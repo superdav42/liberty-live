@@ -32,10 +32,10 @@ Viewer Chat ─┘         │                                                  
 git clone https://github.com/superdav42/liberty-live.git
 cd liberty-live
 npm run setup   # installs deps + clones HeadTTS into ./headtts
-npm start       # starts both HeadTTS (port 8882) and the show server (port 3000)
+npm start       # starts both HeadTTS (port 8882) and the show server (port 3333)
 ```
 
-Open `http://localhost:3000` in Chrome/Edge (WebGL + WebGPU support needed).
+Open `http://localhost:3333` in Chrome/Edge (WebGL + WebGPU support needed).
 
 Click **Start Show** and Liberty will start talking.
 
@@ -56,7 +56,7 @@ Click **Start Show** and Liberty will start talking.
 
 | Variable | Default | Description |
 |---|---|---|
-| `PORT` | `3000` | Web server port |
+| `PORT` | `3333` | Web server port |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama API endpoint |
 | `OLLAMA_MODEL` | `qwen3:8b-16k` | Model to use for generation |
 
@@ -84,7 +84,7 @@ Edit `src/personality.js` to change:
 
 ## Streaming to YouTube
 
-1. Set up OBS Studio with a **Browser Source** pointing to `http://localhost:3000`
+1. Set up OBS Studio with a **Browser Source** pointing to `http://localhost:3333`
 2. Configure OBS output to RTMP: `rtmp://a.rtmp.youtube.com/live2/YOUR_STREAM_KEY`
 3. Start streaming in OBS
 
