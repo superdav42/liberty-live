@@ -7,7 +7,7 @@
 - [ ] **Gesture integration** — Have the LLM emit gesture/pose hints (via Ollama tool calling or keyword detection) that trigger TalkingHead hand gestures (`thumbup`, `shrug`, `index`, `side`) and Mixamo animations.
 - [ ] **Background scenes** — Cycle through background images/videos (studio set, cityscape, etc.) to keep the visual interesting. TalkingHead supports background views natively.
 - [ ] **Thinking animations** — Play idle animations (pacing, looking around, tapping chin) while waiting for Ollama to generate, so there's no dead stare during inference.
-- [ ] **Error recovery** — Auto-restart the show loop on Ollama connection failures, HeadTTS crashes, or WebSocket disconnects. The show must never stop.
+- [x] **Error recovery** — Auto-restart the show loop on Ollama connection failures, HeadTTS crashes, or WebSocket disconnects. The show must never stop. ✅ (exp. backoff + Ollama revival)
 
 ## Phase 2: Audience Interaction
 
@@ -20,7 +20,7 @@
 
 ## Phase 3: Content Depth
 
-- [ ] **Article summarization** — Fetch full article text (not just headlines) and summarize via Ollama before reacting, for more informed takes.
+- [x] **Article summarization** — Fetch full article text (not just headlines) and summarize via Ollama before reacting, for more informed takes. ✅ (researchHeadline in news.js)
 - [ ] **Topic memory** — Persist covered topics across restarts. Avoid repeating the same stories. Track the show's "editorial calendar."
 - [ ] **Debate mode** — Liberty argues both sides of an issue, switching avatar mood/pose between "positions."
 - [ ] **Guest characters** — Load a second avatar for "caller" segments or debates. Use a different TTS voice for the guest.
@@ -60,5 +60,5 @@
 - [ ] Add a proper test suite (Vitest or similar)
 - [ ] Add a configuration file (`.env` or `config.json`) instead of scattered env vars and constants
 - [ ] Bundle TalkingHead + Three.js locally instead of CDN dependency for offline capability
-- [ ] Add health check endpoints for HeadTTS and stream status
+- [x] Add health check endpoints for HeadTTS and stream status ✅ (/api/health + /api/client/status)
 - [ ] TypeScript migration (if the codebase grows substantially)
