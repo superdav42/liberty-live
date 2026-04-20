@@ -206,6 +206,13 @@
       ws.onopen = () => {
         log("Connected to server");
         updateStatus("connected", "Connected");
+        
+        // Report HeadTTS status to server for health check aggregation
+        // This is approximate — the server sees if clients can reach HeadTTS
+        // We set a flag initially, update it when we get TTS errors
+        if (ws.readyState === 1) {
+          ws.send(JSON.stringify({ type: "ping" }));
+        }
       };
 
       ws.onclose = () => {

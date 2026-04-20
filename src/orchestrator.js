@@ -3,7 +3,7 @@
 // Each segment gets fresh context — no carryover from previous topics.
 // Researches articles (full text + web search) before reacting.
 
-import { streamChat } from "./ollama.js";
+import { streamChat, checkOllama, chat } from "./ollama.js";
 import { fetchHeadlines, markCovered, researchHeadline } from "./news.js";
 import { PERSONALITY, pickSegmentType, pickFillerPrompt } from "./personality.js";
 import { processSentence } from "./expressions.js";
@@ -17,6 +17,12 @@ export class Orchestrator {
     this.newsFetchInterval = 5 * 60 * 1000; // 5 minutes
     this.segmentPause = 3000; // ms pause between segments
     this.segmentCount = 0;
+    
+    // Error recovery config
+    this.maxRetries = 3;
+    this.baseRetryDelay = 2000; // 2s base, doubles each retry
+    this.consecutiveErrors = 0;
+    this.lastError = null;
   }
 
   /**
@@ -74,14 +80,36 @@ export class Orchestrator {
     // Brief pause for the opening line
     await this._sleep(5000);
 
-    // Main loop
+    // Main loop with error recovery
     while (this.running) {
       try {
         await this._nextSegment();
+        this.consecutiveErrors = 0; // Reset on success
       } catch (err) {
-        console.error("[orchestrator] Segment error:", err.message);
-        // Brief pause then continue — the show must go on
-        await this._sleep(5000);
+        const isOllamaError = this._isOllamaError(err);
+        this.consecutiveErrors++;
+        this.lastError = err.message;
+        
+        console.error(`[orchestrator] Segment error (attempt ${this.consecutiveErrors}/${this.maxRetries}):`, err.message);
+        
+        if (this.consecutiveErrors >= this.maxRetries) {
+          // All retries exhausted — try to revive Ollama connection
+          console.error("[orchestrator] Max retries reached. Attempting Ollama revival...");
+          const revived = await this._reviveOllama();
+          if (!revived) {
+            console.error("[orchestrator] Ollama revival failed. Pausing 60s then retrying...");
+            await this._sleep(60000);
+            this.consecutiveErrors = 0; // Reset to try again
+          } else {
+            console.log("[orchestrator] Ollama revived.");
+            this.consecutiveErrors = 0;
+          }
+        } else {
+          // Exponential backoff before retry
+          const delay = this.baseRetryDelay * Math.pow(2, this.consecutiveErrors - 1);
+          console.log(`[orchestrator] Retrying in ${delay}ms...`);
+          await this._sleep(delay);
+        }
       }
     }
 
@@ -313,6 +341,36 @@ export class Orchestrator {
 
   _sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Check if error is related to Ollama.
+   */
+  _isOllamaError(err) {
+    const msg = err.message || "";
+    return (
+      msg.includes("Ollama") ||
+      msg.includes("ECONNREFUSED") ||
+      msg.includes("fetch") ||
+      msg.includes("num_predict") ||
+      msg.includes("model")
+    );
+  }
+
+  /**
+   * Attempt to revive Ollama by checking and potentially waiting.
+   */
+  async _reviveOllama() {
+    for (let i = 0; i < 5; i++) {
+      const status = await checkOllama();
+      if (status.ok && status.available) {
+        console.log(`[orchestrator] Ollama check passed after ${i + 1} attempts`);
+        return true;
+      }
+      console.log(`[orchestrator] Waiting for Ollama (${i + 1}/5)...`);
+      await this._sleep(5000);
+    }
+    return false;
   }
 }
 

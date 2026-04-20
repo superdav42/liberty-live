@@ -25,10 +25,25 @@ app.get("/api/health", async (_req, res) => {
   res.json({
     status: "ok",
     ollama,
+    headtts: headttsStatus,
     clients: orchestrator.clients.size,
     running: orchestrator.running,
     segments: orchestrator.segmentCount,
+    lastError: orchestrator.lastError,
   });
+});
+
+// Client status aggregation (frontend reports HeadTTS status here)
+let headttsStatus = { available: null, lastSeen: null };
+app.post("/api/client/status", (req, res) => {
+  const { headtts: ht } = req.body;
+  if (ht !== undefined) {
+    headttsStatus = {
+      available: ht,
+      lastSeen: Date.now(),
+    };
+  }
+  res.json({ status: "ok" });
 });
 
 // Start/stop the show
