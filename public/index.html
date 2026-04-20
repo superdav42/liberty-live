@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Liberty Live - AI Talk Show</title>
+  <link rel="stylesheet" href="css/style.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js/+esm",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
+      "talkinghead": "https://cdn.jsdelivr.net/gh/met4citizen/TalkingHead@1.7/modules/talkinghead.mjs"
+    }
+  }
+  </script>
+</head>
+<body>
+  <!-- Avatar container -->
+  <div id="avatar-container">
+    <div id="avatar"></div>
+
+    <!-- Show overlay -->
+    <div id="overlay">
+      <div id="show-title">LIBERTY LIVE</div>
+      <div id="subtitle-bar"></div>
+      <div id="news-ticker">
+        <span id="ticker-content">Waiting for show to start...</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Control panel (not visible during stream capture) -->
+  <div id="controls">
+    <h2>Liberty Live Control Room</h2>
+
+    <div id="status-bar">
+      <span id="status-indicator" class="offline"></span>
+      <span id="status-text">Offline</span>
+      <span id="segment-count"></span>
+    </div>
+
+    <div class="control-group">
+      <button id="btn-start" onclick="startShow()">Start Show</button>
+      <button id="btn-stop" onclick="stopShow()" disabled>Stop Show</button>
+    </div>
+
+    <div class="control-group">
+      <h3>Send Viewer Comment</h3>
+      <input type="text" id="viewer-name" placeholder="Your name" value="Chat Viewer">
+      <textarea id="viewer-comment" placeholder="Type a comment for Liberty to respond to..." rows="2"></textarea>
+      <button onclick="sendComment()">Send Comment</button>
+    </div>
+
+    <div class="control-group">
+      <h3>Show Log</h3>
+      <div id="show-log"></div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { TalkingHead } from "talkinghead";
+
+    // --- Globals ---
+    let head = null;
+    let ws = null;
+    let speechQueue = [];
+    let isSpeaking = false;
+    let ttsReady = false;
+
+    // HeadTTS server (run separately: cd HeadTTS && npm start)
+    const HEADTTS_WS = "ws://127.0.0.1:8882";
+    const HEADTTS_REST = "http://127.0.0.1:8882";
+
+    // Expose controls to inline onclick handlers
+    window.startShow = startShow;
+    window.stopShow = stopShow;
+    window.sendComment = sendComment;
+
+    // --- Initialize TalkingHead ---
+    async function initAvatar() {
+      const container = document.getElementById("avatar");
+
+      head = new TalkingHead(container, {
+        ttsEndpoint: null, // We handle TTS ourselves via HeadTTS
+        lipsyncModules: ["en"],
+        cameraView: "upper",
+        modelFPS: 30,
+        lightAmbientIntensity: 2.5,
+        lightDirectIntensity: 20,
+        avatarMood: "neutral",
+        avatarIdleEyeContact: 0.6,
+        avatarSpeakingEyeContact: 0.8,
+        avatarSpeakingHeadMove: 0.6,
+      });
+
+      // Load avatar — using the bundled example avatar
+      // Replace with your own VRoid/custom GLB file in public/avatars/
+      try {
+        await head.showAvatar({
+          url: "https://cdn.jsdelivr.net/gh/met4citizen/TalkingHead@1.7/avatars/brunette.glb",
+          body: "F",
+          avatarMood: "neutral",
+          lipsyncLang: "en",
+          baseline: {
+            headRotateX: -0.05,
+            eyeBlinkLeft: 0.15,
+            eyeBlinkRight: 0.15,
+          },
+        });
+        log("Avatar loaded");
+      } catch (err) {
+        log("Avatar load error: " + err.message, "error");
+        console.error("Avatar load error:", err);
+      }
+    }
+
+    // --- HeadTTS integration ---
+    async function speakText(text, mood) {
+      // Set mood on avatar
+      if (head && mood && mood !== "neutral") {
+        head.setMood(mood);
+      }
+
+      // Show subtitle
+      showSubtitle(text);
+
+      // Try HeadTTS REST API first (simpler than WebSocket for MVP)
+      try {
+        const resp = await fetch(HEADTTS_REST + "/v1/synthesize", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            input: text,
+            voice: "af_bella",
+            language: "en-us",
+            speed: 1,
+            audioEncoding: "wav",
+          }),
+        });
+
+        if (!resp.ok) throw new Error(`HeadTTS HTTP ${resp.status}`);
+
+        const data = await resp.json();
+        if (data.error) throw new Error(data.error);
+
+        // Decode base64 WAV to AudioBuffer
+        const wavBytes = Uint8Array.from(atob(data.audio), c => c.charCodeAt(0));
+        const audioCtx = head.audioCtx || new AudioContext();
+        const audioBuffer = await audioCtx.decodeAudioData(wavBytes.buffer);
+
+        // Build the audio object for TalkingHead's speakAudio
+        const audioObj = {
+          audio: audioBuffer,
+          words: data.words || [],
+          wtimes: data.wtimes || [],
+          wdurations: data.wdurations || [],
+          visemes: data.visemes || [],
+          vtimes: data.vtimes || [],
+          vdurations: data.vdurations || [],
+        };
+
+        head.speakAudio(audioObj, { lipsyncLang: "en" }, (subtitle) => {
+          // Word-level subtitle callback
+        });
+
+        // Wait for approximate duration before processing next sentence
+        const durationMs = (audioBuffer.duration * 1000) + 200;
+        await sleep(durationMs);
+
+      } catch (err) {
+        // HeadTTS not available — fall back to built-in lip-sync without audio
+        log("HeadTTS unavailable, showing text only: " + err.message, "warn");
+
+        // Use TalkingHead's built-in Google TTS if configured, otherwise just show text
+        // For MVP without any TTS, we just display subtitles and pause
+        const wordCount = text.split(/\s+/).length;
+        const readingTime = wordCount * 180; // ~180ms per word
+        await sleep(readingTime);
+      }
+
+      // Reset mood after speaking
+      if (head) {
+        head.setMood("neutral");
+      }
+    }
+
+    // --- Speech queue processor ---
+    async function processSpeechQueue() {
+      if (isSpeaking || speechQueue.length === 0) return;
+      isSpeaking = true;
+
+      while (speechQueue.length > 0) {
+        const item = speechQueue.shift();
+        await speakText(item.text, item.mood);
+        await sleep(300); // brief pause between sentences
+      }
+
+      isSpeaking = false;
+      hideSubtitle();
+    }
+
+    // --- WebSocket connection to server ---
+    function connectWS() {
+      const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+      ws = new WebSocket(`${protocol}//${location.host}/ws`);
+
+      ws.onopen = () => {
+        log("Connected to server");
+        updateStatus("connected", "Connected");
+      };
+
+      ws.onclose = () => {
+        log("Disconnected from server");
+        updateStatus("offline", "Disconnected");
+        // Reconnect after 3 seconds
+        setTimeout(connectWS, 3000);
+      };
+
+      ws.onerror = () => {
+        updateStatus("offline", "Connection error");
+      };
+
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        handleServerMessage(msg);
+      };
+    }
+
+    function handleServerMessage(msg) {
+      switch (msg.type) {
+        case "speak":
+          speechQueue.push({ text: msg.text, mood: msg.mood });
+          processSpeechQueue();
+          break;
+
+        case "show_start":
+          log("Show started!");
+          document.getElementById("btn-start").disabled = true;
+          document.getElementById("btn-stop").disabled = false;
+          updateStatus("live", "LIVE");
+          break;
+
+        case "show_stop":
+          log("Show stopped");
+          document.getElementById("btn-start").disabled = false;
+          document.getElementById("btn-stop").disabled = true;
+          updateStatus("connected", "Stopped");
+          speechQueue = [];
+          hideSubtitle();
+          break;
+
+        case "segment_info":
+          if (msg.headline) {
+            updateTicker(msg.headline);
+            log(`[${msg.segmentType}] ${msg.headline}`);
+          } else if (msg.topic) {
+            updateTicker(`Monologue: ${msg.topic}`);
+            log(`[${msg.segmentType}] ${msg.topic}`);
+          } else {
+            log(`[${msg.segmentType}]`);
+          }
+          break;
+
+        case "generating_start":
+          log("Generating: " + (msg.prompt || ""));
+          break;
+
+        case "generating_done":
+          break;
+
+        case "status":
+          document.getElementById("segment-count").textContent =
+            msg.segments > 0 ? `(${msg.segments} segments)` : "";
+          break;
+
+        default:
+          break;
+      }
+    }
+
+    // --- UI helpers ---
+    function showSubtitle(text) {
+      const bar = document.getElementById("subtitle-bar");
+      bar.textContent = text;
+      bar.classList.add("visible");
+    }
+
+    function hideSubtitle() {
+      const bar = document.getElementById("subtitle-bar");
+      bar.classList.remove("visible");
+    }
+
+    function updateTicker(text) {
+      document.getElementById("ticker-content").textContent = text;
+    }
+
+    function updateStatus(state, text) {
+      const indicator = document.getElementById("status-indicator");
+      const statusText = document.getElementById("status-text");
+      indicator.className = state;
+      statusText.textContent = text;
+    }
+
+    function log(text, level = "info") {
+      const logDiv = document.getElementById("show-log");
+      const time = new Date().toLocaleTimeString();
+      const entry = document.createElement("div");
+      entry.className = `log-entry log-${level}`;
+      entry.textContent = `[${time}] ${text}`;
+      logDiv.prepend(entry);
+
+      // Keep log manageable
+      while (logDiv.children.length > 50) {
+        logDiv.removeChild(logDiv.lastChild);
+      }
+    }
+
+    function sleep(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    // --- Control actions ---
+    function startShow() {
+      fetch("/api/show/start", { method: "POST" });
+    }
+
+    function stopShow() {
+      fetch("/api/show/stop", { method: "POST" });
+    }
+
+    function sendComment() {
+      const name = document.getElementById("viewer-name").value;
+      const comment = document.getElementById("viewer-comment").value;
+      if (!comment.trim()) return;
+
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: "comment", name, comment }));
+      }
+      document.getElementById("viewer-comment").value = "";
+      log(`[comment] ${name}: ${comment}`);
+    }
+
+    // --- Boot ---
+    async function init() {
+      log("Initializing Liberty Live...");
+      await initAvatar();
+      connectWS();
+      log("Ready. Click 'Start Show' to begin.");
+    }
+
+    init();
+  </script>
+</body>
+</html>

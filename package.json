@@ -1,0 +1,25 @@
+{
+  "name": "liberty-live",
+  "version": "0.1.0",
+  "description": "24/7 AI-powered live streaming personality - local LLM + 3D avatar talk show",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "rss-parser": "^3.13.0",
+    "ws": "^8.18.0"
+  },
+  "keywords": [
+    "ai",
+    "livestream",
+    "avatar",
+    "ollama",
+    "talkinghead",
+    "vtuber"
+  ],
+  "license": "MIT"
+}
