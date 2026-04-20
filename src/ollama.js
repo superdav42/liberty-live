@@ -2,7 +2,7 @@
 // Streams chat completions from a local Ollama instance.
 
 const OLLAMA_BASE = process.env.OLLAMA_HOST || "http://127.0.0.1:11434";
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "llama3.2:8b";
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "qwen3:8b-16k";
 
 /**
  * Stream a chat completion from Ollama.
