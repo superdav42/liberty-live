@@ -5,3 +5,4 @@ node_modules/
 public/avatars/*.glb
 public/avatars/*.vrm
 headtts/
+.agents/loop-state/

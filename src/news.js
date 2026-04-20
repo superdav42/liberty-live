@@ -1,7 +1,9 @@
 // Liberty Live - News Feed
 // Fetches headlines from RSS feeds to give the host something to talk about.
+// Can also fetch full article content for deeper analysis.
 
 import Parser from "rss-parser";
+import { fetchPageText, searchWeb } from "./search.js";
 
 const parser = new Parser({
   timeout: 10000,
@@ -67,6 +69,30 @@ export async function fetchHeadlines(limit = 10) {
   shuffle(fresh);
 
   return fresh.slice(0, limit);
+}
+
+/**
+ * Fetch full research context for a headline:
+ * 1. Fetch the actual article text from its URL
+ * 2. Search the web for additional perspectives and fact-checking
+ *
+ * @param {object} headline - Headline object with title, link, source
+ * @returns {Promise<{articleText: string, searchResults: Array, researchTime: number}>}
+ */
+export async function researchHeadline(headline) {
+  const t0 = Date.now();
+  console.log(`[news] Researching: "${headline.title.slice(0, 60)}..."`);
+
+  // Fetch article text and web search results in parallel
+  const [articleText, searchResults] = await Promise.all([
+    headline.link ? fetchPageText(headline.link, 3000) : Promise.resolve(""),
+    searchWeb(`${headline.title} fact check analysis`, 4),
+  ]);
+
+  const researchTime = Date.now() - t0;
+  console.log(`[news] Research done in ${researchTime}ms — article: ${articleText.length} chars, search: ${searchResults.length} results`);
+
+  return { articleText, searchResults, researchTime };
 }
 
 /**

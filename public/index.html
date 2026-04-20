@@ -66,11 +66,9 @@
     let ws = null;
     let speechQueue = [];
     let isSpeaking = false;
-    let ttsReady = false;
 
-    // HeadTTS server (run separately: cd HeadTTS && npm start)
-    const HEADTTS_WS = "ws://127.0.0.1:8882";
-    const HEADTTS_REST = "http://127.0.0.1:8882";
+    // HeadTTS server — derive from current host so it works over LAN too
+    const HEADTTS_REST = `http://${location.hostname}:8882`;
 
     // Expose controls to inline onclick handlers
     window.startShow = startShow;
@@ -117,15 +115,15 @@
 
     // --- HeadTTS integration ---
     async function speakText(text, mood) {
-      // Set mood on avatar
-      if (head && mood && mood !== "neutral") {
+      // Set mood on avatar BEFORE speaking for immediate expression change
+      if (head && mood) {
         head.setMood(mood);
       }
 
       // Show subtitle
       showSubtitle(text);
 
-      // Try HeadTTS REST API first (simpler than WebSocket for MVP)
+      // Try HeadTTS REST API
       try {
         const resp = await fetch(HEADTTS_REST + "/v1/synthesize", {
           method: "POST",
@@ -160,27 +158,23 @@
           vdurations: data.vdurations || [],
         };
 
-        head.speakAudio(audioObj, { lipsyncLang: "en" }, (subtitle) => {
-          // Word-level subtitle callback
-        });
+        head.speakAudio(audioObj, { lipsyncLang: "en" }, () => {});
 
-        // Wait for approximate duration before processing next sentence
+        // Wait for audio duration before processing next sentence
         const durationMs = (audioBuffer.duration * 1000) + 200;
         await sleep(durationMs);
 
       } catch (err) {
-        // HeadTTS not available — fall back to built-in lip-sync without audio
-        log("HeadTTS unavailable, showing text only: " + err.message, "warn");
-
-        // Use TalkingHead's built-in Google TTS if configured, otherwise just show text
-        // For MVP without any TTS, we just display subtitles and pause
+        // HeadTTS not available — show text with reading pause
+        log("HeadTTS unavailable: " + err.message, "warn");
         const wordCount = text.split(/\s+/).length;
         const readingTime = wordCount * 180; // ~180ms per word
         await sleep(readingTime);
       }
 
-      // Reset mood after speaking
-      if (head) {
+      // Ease back to neutral after speaking (keep for a moment first)
+      if (head && mood !== "neutral") {
+        await sleep(200);
         head.setMood("neutral");
       }
     }
@@ -192,8 +186,12 @@
 
       while (speechQueue.length > 0) {
         const item = speechQueue.shift();
+        const remaining = speechQueue.length;
+        if (remaining > 2) {
+          log(`Speaking (${remaining} queued): "${item.text.slice(0, 50)}"`);
+        }
         await speakText(item.text, item.mood);
-        await sleep(300); // brief pause between sentences
+        await sleep(250); // brief pause between sentences
       }
 
       isSpeaking = false;
@@ -213,7 +211,6 @@
       ws.onclose = () => {
         log("Disconnected from server");
         updateStatus("offline", "Disconnected");
-        // Reconnect after 3 seconds
         setTimeout(connectWS, 3000);
       };
 
@@ -263,10 +260,11 @@
           break;
 
         case "generating_start":
-          log("Generating: " + (msg.prompt || ""));
+          log("Generating: " + (msg.prompt || "").slice(0, 80));
           break;
 
         case "generating_done":
+          log(`Generation done (${speechQueue.length} queued)`);
           break;
 
         case "status":
@@ -310,7 +308,6 @@
       entry.textContent = `[${time}] ${text}`;
       logDiv.prepend(entry);
 
-      // Keep log manageable
       while (logDiv.children.length > 50) {
         logDiv.removeChild(logDiv.lastChild);
       }

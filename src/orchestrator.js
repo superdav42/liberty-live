@@ -1,17 +1,17 @@
 // Liberty Live - Show Orchestrator
 // The main loop that drives the 24/7 broadcast.
-// Picks segments, generates content via Ollama, and pushes it to connected clients.
+// Each segment gets fresh context — no carryover from previous topics.
+// Researches articles (full text + web search) before reacting.
 
 import { streamChat } from "./ollama.js";
-import { fetchHeadlines, markCovered } from "./news.js";
-import { PERSONALITY, detectMood, pickSegmentType, pickFillerPrompt } from "./personality.js";
+import { fetchHeadlines, markCovered, researchHeadline } from "./news.js";
+import { PERSONALITY, pickSegmentType, pickFillerPrompt } from "./personality.js";
+import { processSentence } from "./expressions.js";
 
 export class Orchestrator {
   constructor() {
     this.running = false;
     this.clients = new Set(); // WebSocket clients
-    this.conversationHistory = [];
-    this.maxHistoryLength = 20; // keep last N exchanges
     this.headlineCache = [];
     this.lastNewsFetch = 0;
     this.newsFetchInterval = 5 * 60 * 1000; // 5 minutes
@@ -64,11 +64,15 @@ export class Orchestrator {
     console.log("[orchestrator] Show started");
     this.broadcast({ type: "show_start" });
 
-    // Opening line
-    await this._runSegment(
-      "Hey folks, welcome back to the show! Liberty here, live and unfiltered. " +
-      "Let's see what fresh chaos the world has cooked up for us today."
+    // Opening line — sent directly (no LLM needed)
+    this._sendSentence(
+      "Hey folks, welcome back to the show! Liberty here, live and unfiltered. Let us see what fresh chaos the world has cooked up for us today.",
+      "happy",
+      null,
     );
+
+    // Brief pause for the opening line
+    await this._sleep(5000);
 
     // Main loop
     while (this.running) {
@@ -99,7 +103,7 @@ export class Orchestrator {
     if (this._queuedViewerPrompt) {
       const prompt = this._queuedViewerPrompt;
       this._queuedViewerPrompt = null;
-      await this._generateAndSpeak(prompt);
+      await this._generateSegment(prompt, "viewer_qa");
       return;
     }
 
@@ -107,7 +111,7 @@ export class Orchestrator {
 
     switch (segment.type) {
       case "news_reaction":
-        await this._newsSegment(segment.prompt);
+        await this._newsSegment();
         break;
 
       case "monologue":
@@ -119,7 +123,7 @@ export class Orchestrator {
         if (this._queuedViewerPrompt) {
           const prompt = this._queuedViewerPrompt;
           this._queuedViewerPrompt = null;
-          await this._generateAndSpeak(prompt);
+          await this._generateSegment(prompt, "viewer_qa");
         } else {
           await this._fillerSegment();
         }
@@ -137,23 +141,20 @@ export class Orchestrator {
     await this._sleep(this.segmentPause + Math.random() * 2000);
   }
 
-  async _newsSegment(promptPrefix) {
+  /**
+   * News segment: fetch article, research it, then react.
+   * Each article gets FRESH context — no carryover from previous segments.
+   */
+  async _newsSegment() {
     await this._refreshHeadlines();
 
     if (this.headlineCache.length === 0) {
-      // No fresh news, do a filler instead
       await this._fillerSegment();
       return;
     }
 
     const headline = this.headlineCache.shift();
     markCovered(headline);
-
-    let prompt = `${promptPrefix} "${headline.title}"`;
-    if (headline.snippet) {
-      prompt += `\n\nHere's a bit more context: ${headline.snippet}`;
-    }
-    prompt += `\n\n(Source: ${headline.source})`;
 
     this.broadcast({
       type: "segment_info",
@@ -162,11 +163,31 @@ export class Orchestrator {
       source: headline.source,
     });
 
-    await this._generateAndSpeak(prompt);
+    // Research: fetch full article + web search in parallel
+    const research = await researchHeadline(headline);
+
+    // Build a rich prompt with all the research context
+    let prompt = `ARTICLE TO REACT TO:\nHeadline: "${headline.title}"\nSource: ${headline.source}`;
+
+    if (research.articleText) {
+      prompt += `\n\nFull article text:\n${research.articleText}`;
+    } else if (headline.snippet) {
+      prompt += `\n\nSummary: ${headline.snippet}`;
+    }
+
+    if (research.searchResults.length > 0) {
+      prompt += "\n\nADDITIONAL CONTEXT FROM WEB SEARCH:";
+      for (const result of research.searchResults) {
+        prompt += `\n- ${result.title}: ${result.snippet}`;
+      }
+    }
+
+    prompt += "\n\nGive your honest, informed take on this. Reference specific facts from the article. If the web search results contradict the article, call it out. Be specific, not generic.";
+
+    await this._generateSegment(prompt, "news_reaction");
   }
 
   async _monologueSegment(promptPrefix) {
-    // Pick a topic from recent news or a random theme
     await this._refreshHeadlines();
 
     let topic;
@@ -184,35 +205,43 @@ export class Orchestrator {
       topic = topics[Math.floor(Math.random() * topics.length)];
     }
 
-    const prompt = `${promptPrefix} ${topic}. Really get into it — this is your soapbox moment.`;
+    const prompt = `${promptPrefix} ${topic}. Really get into it — this is your soapbox moment. Be specific with examples and facts.`;
 
     this.broadcast({ type: "segment_info", segmentType: "monologue", topic });
 
-    await this._generateAndSpeak(prompt);
+    await this._generateSegment(prompt, "monologue");
   }
 
   async _fillerSegment() {
     const prompt = pickFillerPrompt();
     this.broadcast({ type: "segment_info", segmentType: "filler" });
-    await this._generateAndSpeak(prompt);
+    await this._generateSegment(prompt, "filler");
   }
 
   /**
-   * Core method: send prompt to Ollama, stream response, broadcast to clients.
+   * Core method: send prompt to Ollama with FRESH context, stream response,
+   * parse expressions, broadcast to clients.
+   *
+   * Each call builds messages from scratch — system prompt + user prompt only.
+   * No conversation history carryover between segments.
    */
-  async _generateAndSpeak(userPrompt) {
+  async _generateSegment(userPrompt, segmentType) {
     this.segmentCount++;
+    const segNum = this.segmentCount;
+    const t0 = Date.now();
 
-    // Build messages with personality + recent history
+    // FRESH context every segment — system prompt + this prompt only
     const messages = [
       { role: "system", content: PERSONALITY.systemPrompt },
-      ...this.conversationHistory.slice(-this.maxHistoryLength),
       { role: "user", content: userPrompt },
     ];
 
-    // Collect the full response while streaming
+    console.log(`[segment #${segNum}] [${segmentType}] Starting — prompt: "${userPrompt.slice(0, 80)}..."`);
+
+    // Stream from Ollama, process sentences, broadcast
     let fullResponse = "";
     let sentenceBuffer = "";
+    let sentenceCount = 0;
 
     this.broadcast({ type: "generating_start", prompt: userPrompt.slice(0, 100) });
 
@@ -220,19 +249,18 @@ export class Orchestrator {
       fullResponse += chunk;
       sentenceBuffer += chunk;
 
-      // Send sentences to TTS as they complete (on sentence-ending punctuation)
+      // Send sentences as they complete (split on sentence-ending punctuation)
       const sentences = splitSentences(sentenceBuffer);
       if (sentences.length > 1) {
-        // All but the last are complete sentences
         for (let i = 0; i < sentences.length - 1; i++) {
-          const sentence = sentences[i].trim();
-          if (sentence) {
-            const mood = detectMood(sentence);
-            this.broadcast({
-              type: "speak",
-              text: sentence,
-              mood,
-            });
+          const raw = sentences[i].trim();
+          if (raw) {
+            sentenceCount++;
+            const processed = processSentence(raw);
+            if (processed.text) {
+              console.log(`[segment #${segNum}] Sentence ${sentenceCount} [${processed.mood}]: "${processed.text.slice(0, 60)}..."`);
+              this._sendSentence(processed.text, processed.mood, processed.gesture);
+            }
           }
         }
         sentenceBuffer = sentences[sentences.length - 1];
@@ -241,26 +269,30 @@ export class Orchestrator {
 
     // Flush remaining text
     if (sentenceBuffer.trim()) {
-      const mood = detectMood(sentenceBuffer);
-      this.broadcast({
-        type: "speak",
-        text: sentenceBuffer.trim(),
-        mood,
-      });
+      sentenceCount++;
+      const processed = processSentence(sentenceBuffer.trim());
+      if (processed.text) {
+        console.log(`[segment #${segNum}] Sentence ${sentenceCount} (final) [${processed.mood}]: "${processed.text.slice(0, 60)}..."`);
+        this._sendSentence(processed.text, processed.mood, processed.gesture);
+      }
     }
 
-    // Update conversation history
-    this.conversationHistory.push(
-      { role: "user", content: userPrompt },
-      { role: "assistant", content: fullResponse }
-    );
-
-    // Trim history if too long
-    if (this.conversationHistory.length > this.maxHistoryLength * 2) {
-      this.conversationHistory = this.conversationHistory.slice(-this.maxHistoryLength * 2);
-    }
+    const elapsed = Date.now() - t0;
+    console.log(`[segment #${segNum}] Done — ${sentenceCount} sentences, ${fullResponse.length} chars in ${elapsed}ms`);
 
     this.broadcast({ type: "generating_done" });
+  }
+
+  /**
+   * Send a processed sentence to all clients.
+   */
+  _sendSentence(text, mood, gesture) {
+    this.broadcast({
+      type: "speak",
+      text,
+      mood: mood || "neutral",
+      gesture: gesture || null,
+    });
   }
 
   async _refreshHeadlines() {
@@ -279,14 +311,6 @@ export class Orchestrator {
     }
   }
 
-  async _runSegment(text) {
-    const mood = detectMood(text);
-    this.broadcast({ type: "speak", text, mood });
-    // Wait for approximate speaking time (rough estimate: 150ms per word)
-    const words = text.split(/\s+/).length;
-    await this._sleep(words * 150 + 1000);
-  }
-
   _sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
@@ -294,8 +318,9 @@ export class Orchestrator {
 
 /**
  * Split text on sentence boundaries, keeping the delimiter with the sentence.
+ * Handles emojis appearing after sentence-ending punctuation.
  */
 function splitSentences(text) {
-  // Split on . ! ? followed by a space or end of string, but not on common abbreviations
-  return text.split(/(?<=[.!?])\s+/);
+  // Split on . ! ? followed by optional emoji(s) and then a space or end
+  return text.split(/(?<=[.!?](?:\s*[\p{Emoji_Presentation}\p{Extended_Pictographic}])*)\s+/u);
 }
