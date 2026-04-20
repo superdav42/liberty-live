@@ -5,7 +5,10 @@
   "type": "module",
   "main": "src/server.js",
   "scripts": {
-    "start": "node src/server.js",
+    "setup": "npm install && ([ -d headtts ] || git clone --depth 1 https://github.com/met4citizen/HeadTTS.git headtts) && cd headtts && npm install",
+    "start": "node src/start.js",
+    "start:server": "node src/server.js",
+    "start:tts": "node headtts/modules/headtts-node.mjs",
     "dev": "node --watch src/server.js"
   },
   "dependencies": {

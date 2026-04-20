@@ -18,36 +18,28 @@ Viewer Chat ─┘         │                                                  
 
 ## Prerequisites
 
-1. **Ollama** running locally with a model pulled:
+1. **Node.js** 20+
+2. **Ollama** running locally with a model pulled:
    ```bash
    # Install from https://ollama.com
-   ollama pull llama3.2:8b
-   ollama serve  # if not already running
+   ollama pull qwen3:8b-16k   # or any chat model you prefer
+   ollama serve                # if not already running
    ```
-
-2. **HeadTTS** (optional but recommended for voice):
-   ```bash
-   git clone https://github.com/met4citizen/HeadTTS.git
-   cd HeadTTS
-   npm install
-   npm start  # starts TTS server on port 8882
-   ```
-   Without HeadTTS, the avatar will display subtitles but won't speak aloud.
-
-3. **Node.js** 20+
 
 ## Quick Start
 
 ```bash
-git clone https://github.com/YOUR_USER/liberty-live.git
+git clone https://github.com/superdav42/liberty-live.git
 cd liberty-live
-npm install
-npm start
+npm run setup   # installs deps + clones HeadTTS into ./headtts
+npm start       # starts both HeadTTS (port 8882) and the show server (port 3000)
 ```
 
 Open `http://localhost:3000` in Chrome/Edge (WebGL + WebGPU support needed).
 
 Click **Start Show** and Liberty will start talking.
+
+> Without HeadTTS, the avatar still loads and subtitles display — you just won't get voice.
 
 ## How It Works
 
@@ -66,7 +58,7 @@ Click **Start Show** and Liberty will start talking.
 |---|---|---|
 | `PORT` | `3000` | Web server port |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama API endpoint |
-| `OLLAMA_MODEL` | `llama3.2:8b` | Model to use for generation |
+| `OLLAMA_MODEL` | `qwen3:8b-16k` | Model to use for generation |
 
 ### Custom Avatar
 
@@ -110,6 +102,7 @@ liberty-live/
 │   ├── index.html         # Frontend with TalkingHead + controls
 │   ├── css/style.css      # Show styling
 │   └── avatars/           # Custom avatar .glb files
+├── headtts/               # HeadTTS clone (auto-installed by npm run setup)
 └── package.json
 ```
 
