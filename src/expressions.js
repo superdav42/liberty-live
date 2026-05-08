@@ -163,6 +163,67 @@ export function expandContractions(text) {
 }
 
 /**
+ * Acronyms that should be pronounced letter-by-letter by TTS.
+ * We add periods between letters so the TTS engine spells them out
+ * instead of trying to pronounce them as words. We deliberately exclude
+ * acronyms that are read as words (NATO, NASA, OPEC, FEMA, AIDS, etc.).
+ *
+ * Order matters: longer acronyms first so we do not partially match.
+ */
+const PRONOUNCED_LETTER_ACRONYMS = [
+  // Country codes — most common, do these first
+  "USA", "US", "UK", "EU", "UN",
+  // Three-letter agencies (read letter-by-letter)
+  "FBI", "CIA", "NSA", "DEA", "DOJ", "DHS", "ATF", "TSA",
+  "IRS", "SEC", "FTC", "FCC", "FDA", "EPA", "DOD", "DOE",
+  "GAO", "OMB", "CDC", "WHO", "ICC", "BLM", "DNC", "RNC",
+  "GOP", "PBS", "BBC", "CNN", "NPR", "FOX", "MSM",
+  "NYT", "WSJ", "WaPo", "AP",
+  // Tech / regulatory
+  "AI", "ML", "VPN", "DNS", "DRM", "EFF", "ACLU", "NRA", "NEA",
+  // Programs
+  "TANF", "EBT", "SNAP", "SSA", "SSI", "VA", "HUD",
+  // Surveillance / law
+  "FISA", "PATRIOT", "NDAA",
+  // Markets / economics
+  "GDP", "CPI", "PCE", "BLS", "CBO", "Fed", "FOMC", "ECB",
+];
+
+// Pre-compute regexes once: each one matches the bare acronym at word boundaries,
+// not when already periodized. We exclude an already-periodized form (e.g.,
+// "U.S.") and lowercase forms intentionally (don't match "us" the pronoun).
+const ACRONYM_PATTERNS = PRONOUNCED_LETTER_ACRONYMS
+  .filter((a) => a.length >= 2 && /^[A-Z]+$/.test(a))
+  .sort((a, b) => b.length - a.length) // longest first
+  .map((a) => ({
+    acronym: a,
+    // Match the acronym as a standalone word, in any case (e.g. US, U.S already
+    // has periods so we match the bareword only). We allow it to be at start/end
+    // of string and surrounded by non-alphanumerics. The negative lookbehind/ahead
+    // for "." prevents re-periodizing already-periodized acronyms like "U.S.".
+    regex: new RegExp(`(?<![A-Za-z0-9.])${a}(?![A-Za-z0-9.])`, "g"),
+    // The replacement: letters separated by periods, with a trailing period
+    replacement: a.split("").join(".") + ".",
+  }));
+
+/**
+ * Normalize acronyms for TTS pronunciation.
+ * "the FBI and IRS in the US" → "the F.B.I. and I.R.S. in the U.S."
+ *
+ * Skips already-periodized forms ("U.S." stays as "U.S.").
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+export function normalizeAcronyms(text) {
+  let result = text;
+  for (const { regex, replacement } of ACRONYM_PATTERNS) {
+    result = result.replace(regex, replacement);
+  }
+  return result;
+}
+
+/**
  * Strip markdown formatting that TTS shouldn't pronounce.
  * Removes **bold**, *italic*, and other markup.
  *
@@ -180,7 +241,8 @@ export function stripMarkdown(text) {
 }
 
 /**
- * Full pipeline: parse expression, strip markdown, expand contractions.
+ * Full pipeline: parse expression, strip markdown, expand contractions,
+ * normalize acronyms (US → U.S., FBI → F.B.I., etc).
  * Used by the orchestrator before broadcasting to clients.
  *
  * @param {string} rawText - Raw LLM output sentence
@@ -190,8 +252,9 @@ export function processSentence(rawText) {
   const expr = parseExpression(rawText);
   const clean = stripMarkdown(expr.text);
   const expanded = expandContractions(clean);
+  const normalized = normalizeAcronyms(expanded);
   return {
-    text: expanded,
+    text: normalized,
     mood: expr.mood,
     gesture: expr.gesture,
   };

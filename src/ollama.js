@@ -2,7 +2,7 @@
 // Streams chat completions from a local Ollama instance.
 
 const OLLAMA_BASE = process.env.OLLAMA_HOST || "http://127.0.0.1:11434";
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "qwen3:8b-16k";
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "gemma4:e4b";
 
 /**
  * Stream a chat completion from Ollama.
@@ -20,10 +20,10 @@ export async function* streamChat(messages, options = {}) {
     // Let thinking models reason deeply — thinking tokens stay hidden,
     // only visible content is yielded to callers.
     options: {
-      temperature: 0.9,
+      temperature: 0.85,
       top_p: 0.95,
       repeat_penalty: 1.1,
-      num_predict: 2048,
+      num_predict: 3072,
       ...options,
     },
   };
@@ -120,10 +120,10 @@ export async function chat(messages, options = {}) {
     messages,
     stream: false,
     options: {
-      temperature: 0.9,
+      temperature: 0.85,
       top_p: 0.95,
       repeat_penalty: 1.1,
-      num_predict: 2048,
+      num_predict: 3072,
       ...options,
     },
   };

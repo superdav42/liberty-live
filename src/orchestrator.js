@@ -1,7 +1,11 @@
 // Liberty Live - Show Orchestrator
 // The main loop that drives the 24/7 broadcast.
-// Each segment gets fresh context — no carryover from previous topics.
-// Researches articles (full text + web search) before reacting.
+// Each segment gets a fresh user prompt + a rolling "show memory" of recent
+// segment summaries injected into the system prompt, so Liberty can do
+// natural callbacks ("Earlier I was ranting about X, well now look at this...")
+// without repeating arguments.
+// News segments fetch the article + web search + extract direct quotes so
+// the avatar can read passages from the article verbatim.
 
 import { streamChat, checkOllama, chat } from "./ollama.js";
 import { fetchHeadlines, markCovered, researchHeadline } from "./news.js";
@@ -15,9 +19,14 @@ export class Orchestrator {
     this.headlineCache = [];
     this.lastNewsFetch = 0;
     this.newsFetchInterval = 5 * 60 * 1000; // 5 minutes
-    this.segmentPause = 3000; // ms pause between segments
+    this.segmentPause = 1500; // ms pause between segments (reduced for tighter pacing)
     this.segmentCount = 0;
-    
+
+    // Show memory — rolling summary of recent segments so Liberty can do callbacks
+    // Each entry: { type, topic, oneLineSummary }
+    this.showMemory = [];
+    this.maxMemoryEntries = 4;
+
     // Error recovery config
     this.maxRetries = 3;
     this.baseRetryDelay = 2000; // 2s base, doubles each retry
@@ -50,13 +59,24 @@ export class Orchestrator {
 
   /**
    * Handle a viewer comment from the frontend.
+   * @param {string} name - Viewer name
+   * @param {string} comment - Comment text
+   * @param {boolean} urgent - If true, interrupt current speech to respond immediately
    */
-  handleViewerComment(name, comment) {
+  handleViewerComment(name, comment, urgent = false) {
     if (!this.running) return;
 
     // Queue it as the next segment by injecting into conversation
     const prompt = `A viewer named "${name}" says in chat: "${comment}". Respond to them directly.`;
-    this._queuedViewerPrompt = prompt;
+    
+    if (urgent) {
+      // Interrupt: clear queue and respond immediately
+      this._queuedViewerPrompt = prompt;
+      this._interruptQueue = true;
+      console.log(`[orchestrator] URGENT comment from ${name}, interrupting queue`);
+    } else {
+      this._queuedViewerPrompt = prompt;
+    }
   }
 
   /**
@@ -131,7 +151,7 @@ export class Orchestrator {
     if (this._queuedViewerPrompt) {
       const prompt = this._queuedViewerPrompt;
       this._queuedViewerPrompt = null;
-      await this._generateSegment(prompt, "viewer_qa");
+      await this._generateSegment(prompt, "viewer_qa", { topic: "viewer comment" });
       return;
     }
 
@@ -151,7 +171,7 @@ export class Orchestrator {
         if (this._queuedViewerPrompt) {
           const prompt = this._queuedViewerPrompt;
           this._queuedViewerPrompt = null;
-          await this._generateSegment(prompt, "viewer_qa");
+          await this._generateSegment(prompt, "viewer_qa", { topic: "viewer comment" });
         } else {
           await this._fillerSegment();
         }
@@ -165,13 +185,13 @@ export class Orchestrator {
         await this._fillerSegment();
     }
 
-    // Pause between segments
-    await this._sleep(this.segmentPause + Math.random() * 2000);
+    // Pause between segments — kept short for tighter pacing
+    await this._sleep(this.segmentPause + Math.random() * 1000);
   }
 
   /**
    * News segment: fetch article, research it, then react.
-   * Each article gets FRESH context — no carryover from previous segments.
+   * Includes show memory so Liberty can do callbacks to earlier topics.
    */
   async _newsSegment() {
     await this._refreshHeadlines();
@@ -184,15 +204,20 @@ export class Orchestrator {
     const headline = this.headlineCache.shift();
     markCovered(headline);
 
+    // Research: fetch full article + web search in parallel
+    const research = await researchHeadline(headline);
+
+    // Broadcast article details to frontend BEFORE generation starts so the
+    // article panel can render while Liberty is thinking.
     this.broadcast({
       type: "segment_info",
       segmentType: "news_reaction",
       headline: headline.title,
       source: headline.source,
+      url: headline.link || null,
+      articleText: research.articleText || headline.snippet || "",
+      quotes: research.quotes || [],
     });
-
-    // Research: fetch full article + web search in parallel
-    const research = await researchHeadline(headline);
 
     // Build a rich prompt with all the research context
     let prompt = `ARTICLE TO REACT TO:\nHeadline: "${headline.title}"\nSource: ${headline.source}`;
@@ -203,6 +228,13 @@ export class Orchestrator {
       prompt += `\n\nSummary: ${headline.snippet}`;
     }
 
+    if (research.quotes && research.quotes.length > 0) {
+      prompt += "\n\nDIRECT QUOTES FROM THE ARTICLE (read at least one of these aloud verbatim, in quotation marks, and react to it):";
+      for (const q of research.quotes) {
+        prompt += `\n- "${q}"`;
+      }
+    }
+
     if (research.searchResults.length > 0) {
       prompt += "\n\nADDITIONAL CONTEXT FROM WEB SEARCH:";
       for (const result of research.searchResults) {
@@ -210,9 +242,9 @@ export class Orchestrator {
       }
     }
 
-    prompt += "\n\nGive your honest, informed take on this. Reference specific facts from the article. If the web search results contradict the article, call it out. Be specific, not generic.";
+    prompt += "\n\nGive your honest, informed take. Stay on this ONE article — do not pivot to a different topic. Cite specific facts (numbers, names) from the article. Read at least one direct quote verbatim if quotes were provided. Build a sustained 6 to 10 sentence argument with a clear thesis, evidence, and conclusion.";
 
-    await this._generateSegment(prompt, "news_reaction");
+    await this._generateSegment(prompt, "news_reaction", { topic: headline.title });
   }
 
   async _monologueSegment(promptPrefix) {
@@ -233,38 +265,45 @@ export class Orchestrator {
       topic = topics[Math.floor(Math.random() * topics.length)];
     }
 
-    const prompt = `${promptPrefix} ${topic}. Really get into it — this is your soapbox moment. Be specific with examples and facts.`;
+    const prompt = `${promptPrefix} ${topic}. Really get into it — this is your soapbox moment. Build the argument across 6 to 10 sentences. Stay on THIS topic — do not pivot. Be specific with examples, names, and facts.`;
 
     this.broadcast({ type: "segment_info", segmentType: "monologue", topic });
 
-    await this._generateSegment(prompt, "monologue");
+    await this._generateSegment(prompt, "monologue", { topic });
   }
 
   async _fillerSegment() {
     const prompt = pickFillerPrompt();
     this.broadcast({ type: "segment_info", segmentType: "filler" });
-    await this._generateSegment(prompt, "filler");
+    await this._generateSegment(prompt, "filler", { topic: prompt.slice(0, 60) });
   }
 
   /**
-   * Core method: send prompt to Ollama with FRESH context, stream response,
-   * parse expressions, broadcast to clients.
+   * Core method: build messages with show memory + system prompt + user prompt,
+   * stream from Ollama, process sentences, broadcast to clients,
+   * then summarize this segment and append to show memory.
    *
-   * Each call builds messages from scratch — system prompt + user prompt only.
-   * No conversation history carryover between segments.
+   * @param {string} userPrompt - The segment-specific prompt
+   * @param {string} segmentType - "news_reaction" | "monologue" | "viewer_qa" | "filler"
+   * @param {{topic?: string}} [meta] - Metadata used for show memory
    */
-  async _generateSegment(userPrompt, segmentType) {
+  async _generateSegment(userPrompt, segmentType, meta = {}) {
     this.segmentCount++;
     const segNum = this.segmentCount;
     const t0 = Date.now();
 
-    // FRESH context every segment — system prompt + this prompt only
+    // Build the system prompt with show memory injected (lets Liberty do callbacks)
+    const memoryBlock = this._buildMemoryBlock();
+    const systemContent = memoryBlock
+      ? `${PERSONALITY.systemPrompt}\n\n${memoryBlock}`
+      : PERSONALITY.systemPrompt;
+
     const messages = [
-      { role: "system", content: PERSONALITY.systemPrompt },
+      { role: "system", content: systemContent },
       { role: "user", content: userPrompt },
     ];
 
-    console.log(`[segment #${segNum}] [${segmentType}] Starting — prompt: "${userPrompt.slice(0, 80)}..."`);
+    console.log(`[segment #${segNum}] [${segmentType}] Starting — prompt: "${userPrompt.slice(0, 80)}..." (memory: ${this.showMemory.length})`);
 
     // Stream from Ollama, process sentences, broadcast
     let fullResponse = "";
@@ -308,13 +347,73 @@ export class Orchestrator {
     const elapsed = Date.now() - t0;
     console.log(`[segment #${segNum}] Done — ${sentenceCount} sentences, ${fullResponse.length} chars in ${elapsed}ms`);
 
+    // Update show memory with this segment so future segments can reference it.
+    // Cheap one-line summary: first ~140 chars of cleaned text.
+    this._appendMemory(segmentType, meta.topic, fullResponse);
+
     this.broadcast({ type: "generating_done" });
+  }
+
+  /**
+   * Build the "show memory" system-prompt addendum so Liberty knows what
+   * she has been talking about. Empty string when no memory yet.
+   */
+  _buildMemoryBlock() {
+    if (this.showMemory.length === 0) return "";
+    const lines = this.showMemory.map((m, i) => {
+      const idx = this.showMemory.length - i; // most recent = 1
+      const ago = idx === 1 ? "Just now" : `${idx} segments ago`;
+      const t = m.topic ? ` (${m.topic})` : "";
+      return `- ${ago} [${m.type}]${t}: ${m.summary}`;
+    });
+    return [
+      "SHOW MEMORY — what you have already covered earlier in this broadcast:",
+      ...lines,
+      "",
+      "Use this memory only for natural callbacks (e.g., 'Earlier I was ranting about X, well now look at this...'). Do NOT repeat the same arguments. Do NOT pivot to those past topics — stay on the new prompt below.",
+    ].join("\n");
+  }
+
+  /**
+   * Append a segment summary to rolling show memory.
+   * Strips emojis, contractions are already handled in the cleaned response,
+   * we just keep a compact one-line summary.
+   */
+  _appendMemory(segmentType, topic, fullResponse) {
+    // Strip emojis and normalize whitespace for a compact summary
+    const cleaned = (fullResponse || "")
+      .replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    // Take the first sentence-ish chunk up to ~160 chars as the summary
+    const summary = cleaned.length > 160
+      ? cleaned.slice(0, 160).replace(/\s+\S*$/, "") + "…"
+      : cleaned;
+
+    this.showMemory.push({
+      type: segmentType,
+      topic: topic || null,
+      summary,
+      timestamp: Date.now(),
+    });
+
+    // Trim to max entries
+    while (this.showMemory.length > this.maxMemoryEntries) {
+      this.showMemory.shift();
+    }
   }
 
   /**
    * Send a processed sentence to all clients.
    */
   _sendSentence(text, mood, gesture) {
+    // Check for queue interruption
+    if (this._interruptQueue) {
+      this._interruptQueue = false;
+      this.broadcast({ type: "interrupt" });
+      console.log("[orchestrator] Sent interrupt to clients");
+    }
+
     this.broadcast({
       type: "speak",
       text,

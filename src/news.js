@@ -75,9 +75,10 @@ export async function fetchHeadlines(limit = 10) {
  * Fetch full research context for a headline:
  * 1. Fetch the actual article text from its URL
  * 2. Search the web for additional perspectives and fact-checking
+ * 3. Extract direct quotes from the article so the avatar can read them aloud
  *
  * @param {object} headline - Headline object with title, link, source
- * @returns {Promise<{articleText: string, searchResults: Array, researchTime: number}>}
+ * @returns {Promise<{articleText: string, searchResults: Array, quotes: string[], researchTime: number}>}
  */
 export async function researchHeadline(headline) {
   const t0 = Date.now();
@@ -85,14 +86,56 @@ export async function researchHeadline(headline) {
 
   // Fetch article text and web search results in parallel
   const [articleText, searchResults] = await Promise.all([
-    headline.link ? fetchPageText(headline.link, 3000) : Promise.resolve(""),
+    headline.link ? fetchPageText(headline.link, 4000) : Promise.resolve(""),
     searchWeb(`${headline.title} fact check analysis`, 4),
   ]);
 
-  const researchTime = Date.now() - t0;
-  console.log(`[news] Research done in ${researchTime}ms — article: ${articleText.length} chars, search: ${searchResults.length} results`);
+  const quotes = extractQuotes(articleText);
 
-  return { articleText, searchResults, researchTime };
+  const researchTime = Date.now() - t0;
+  console.log(`[news] Research done in ${researchTime}ms — article: ${articleText.length} chars, ${quotes.length} quotes, ${searchResults.length} search results`);
+
+  return { articleText, searchResults, quotes, researchTime };
+}
+
+/**
+ * Extract direct quotes (text in quotation marks) from article body.
+ * Returns the most useful ones — substantive sentences in quotes,
+ * not single-word "scare" quotes.
+ *
+ * @param {string} text - Article body text
+ * @returns {string[]} Array of quoted sentences (without surrounding quote marks)
+ */
+function extractQuotes(text) {
+  if (!text) return [];
+
+  const quotes = [];
+  // Match double-quoted runs of 4+ words (handles smart quotes too: " " " ")
+  const re = /[""]([^""]{20,400})[""]/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const q = m[1].trim();
+    // Skip if it is mostly punctuation or has no spaces (single token)
+    const words = q.split(/\s+/).filter(Boolean);
+    if (words.length < 4) continue;
+    // Skip URLs and obvious metadata
+    if (/^https?:/i.test(q)) continue;
+    if (q.includes("@")) continue;
+    quotes.push(q);
+  }
+
+  // Dedupe (case-insensitive)
+  const seen = new Set();
+  const unique = [];
+  for (const q of quotes) {
+    const key = q.toLowerCase().slice(0, 60);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(q);
+  }
+
+  // Return top 3 — that is plenty of context, more risks bloating the prompt
+  return unique.slice(0, 3);
 }
 
 /**
