@@ -86,7 +86,87 @@ npm run dev       # server only with --watch (no HeadTTS)
 |---|---|---|
 | `PORT` | `3333` | Show server port |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama API URL |
-| `OLLAMA_MODEL` | `qwen3:8b-16k` | Ollama model name |
+| `OLLAMA_MODEL` | `gemma4:e4b` | Ollama model name (set in `~/.config/systemd/user/liberty-live.service`) |
+| `AUTO_START` | unset | If `true`/`1`, the show loop starts automatically 5s after server boot |
+
+### Production operations (systemd)
+
+Two user-level systemd units run the stack on this host. They are enabled and persist across reboots.
+
+| Unit | Role | Logs |
+|---|---|---|
+| `liberty-live.service` | Show server (Express + WebSocket + Ollama bridge + HeadTTS child) on port 3333 | `~/.aidevops/logs/liberty-live.log` |
+| `liberty-stream.service` | YouTube streaming pipeline: Xvfb + Chrome (headless, software WebGL) + ffmpeg → RTMP | `~/.aidevops/logs/liberty-stream.log` |
+
+`liberty-stream` has a soft `Wants=liberty-live.service` dependency; `stream.sh` preflights the show server before launching Chrome.
+
+#### Starting
+
+```bash
+# Start both (show first, then stream)
+systemctl --user start liberty-live.service
+systemctl --user start liberty-stream.service
+
+# Enable autostart on boot (already enabled on this host)
+systemctl --user enable liberty-live.service liberty-stream.service
+```
+
+#### Stopping
+
+```bash
+# Stop the stream first so YouTube sees a clean disconnect, then the show
+systemctl --user stop liberty-stream.service
+systemctl --user stop liberty-live.service
+```
+
+`liberty-stream` uses `KillMode=mixed`, so stopping it terminates Xvfb, Chrome, ffmpeg, and the Chrome watchdog subshell together. Stopping `liberty-live` also kills the HeadTTS child it spawned.
+
+#### Restarting
+
+```bash
+# After editing src/, public/, or .env — restart the show only
+systemctl --user restart liberty-live.service
+
+# After editing stream.sh or YouTube credentials — restart the stream only
+systemctl --user restart liberty-stream.service
+
+# Full pipeline reset (e.g. Chrome wedged, black-frame stream)
+systemctl --user restart liberty-stream.service liberty-live.service
+```
+
+Both units have `Restart=on-failure`, so a Chrome crash or unhandled show-server exception triggers automatic recovery within ~10s. The Chrome watchdog inside `stream.sh` kills ffmpeg if Chrome dies, which trips `Restart=on-failure` on the whole stream unit.
+
+#### Status and monitoring
+
+```bash
+# Quick health
+systemctl --user status liberty-live.service liberty-stream.service
+curl -s http://localhost:3333/api/health   # {running, model, clients}
+
+# Live logs
+journalctl --user -u liberty-live.service -f
+journalctl --user -u liberty-stream.service -f
+
+# ffmpeg progress (carriage-return delimited — convert before reading)
+tr '\r' '\n' < /tmp/ffmpeg-stream.log | tail -20
+
+# Render check (writes the X11 :99 display to PNG)
+# stream.sh updates /tmp/stream-now.png periodically; >100KB means content, ~3KB means black
+ls -l /tmp/stream-now.png
+```
+
+#### Reloading systemd units
+
+After editing `~/.config/systemd/user/liberty-*.service`:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user restart liberty-live.service liberty-stream.service
+```
+
+#### Credentials
+
+`.env` (gitignored) holds `YOUTUBE_RTMP_URL` and `YOUTUBE_STREAM_KEY`. After rotating the key in YouTube Studio, restart only `liberty-stream`. Never paste the key into logs, commits, or chat.
 
 ### Adding a new segment type
 
