@@ -3,10 +3,10 @@
 ## Phase 1: Core Polish (MVP → Watchable)
 
 - [ ] **Custom avatar** — Create a quirky, non-realistic character in VRoid Studio. Export VRM, convert to GLB via Blender with ARKit + Oculus blend shapes. Replace the placeholder brunette avatar.
-- [ ] **Speech interruption** — Allow new segments to interrupt the current speech queue instead of waiting for it to drain. Critical for responsive viewer interaction.
-- [ ] **Gesture integration** — Have the LLM emit gesture/pose hints (via Ollama tool calling or keyword detection) that trigger TalkingHead hand gestures (`thumbup`, `shrug`, `index`, `side`) and Mixamo animations.
-- [ ] **Background scenes** — Cycle through background images/videos (studio set, cityscape, etc.) to keep the visual interesting. TalkingHead supports background views natively.
-- [ ] **Thinking animations** — Play idle animations (pacing, looking around, tapping chin) while waiting for Ollama to generate, so there's no dead stare during inference.
+- [x] **Speech interruption** — Allow new segments to interrupt the current speech queue instead of waiting for it to drain. Critical for responsive viewer interaction. ✅ (urgent checkbox clears queue)
+- [x] **Gesture integration** — Have the LLM emit gesture/pose hints (via Ollama tool calling or keyword detection) that trigger TalkingHead hand gestures (`thumbup`, `shrug`, `index`, `side`) and Mixamo animations. ✅ (emoji→gesture mapping + camera movement)
+- [x] **Background scenes** — Cycle through background images/videos (studio set, cityscape, etc.) to keep the visual interesting. TalkingHead supports background views natively. ✅ (5 gradient backgrounds cycle after each segment)
+- [x] **Thinking animations** — Play idle animations (pacing, looking around, tapping chin) while waiting for Ollama to generate, so there's no dead stare during inference. ✅ (gentle head sway during generating_start→done)
 - [x] **Error recovery** — Auto-restart the show loop on Ollama connection failures, HeadTTS crashes, or WebSocket disconnects. The show must never stop. ✅ (exp. backoff + Ollama revival)
 
 ## Phase 2: Audience Interaction

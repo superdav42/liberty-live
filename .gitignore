@@ -6,3 +6,15 @@ public/avatars/*.glb
 public/avatars/*.vrm
 headtts/
 .agents/loop-state/
+
+# Avatar source assets (kept out of git — too large)
+/model.glb
+/model.vrm
+/model2.glb
+/rocketbox.zip
+/rp_posed_*.zip
+/rp_rigged*.zip
+/rp_model/
+/rp_rigged/
+/rp_rigged_*/
+
