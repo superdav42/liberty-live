@@ -64,11 +64,11 @@ app.post("/api/show/stop", (_req, res) => {
 
 // Viewer comment endpoint
 app.post("/api/comment", (req, res) => {
-  const { name, comment } = req.body;
+  const { name, comment, urgent } = req.body;
   if (!comment) {
     return res.status(400).json({ error: "comment required" });
   }
-  orchestrator.handleViewerComment(name || "Anonymous", comment);
+  orchestrator.handleViewerComment(name || "Anonymous", comment, urgent || false);
   res.json({ status: "queued" });
 });
 
@@ -86,7 +86,7 @@ wss.on("connection", (ws) => {
     try {
       const msg = JSON.parse(raw);
       if (msg.type === "comment") {
-        orchestrator.handleViewerComment(msg.name || "Anonymous", msg.comment);
+        orchestrator.handleViewerComment(msg.name || "Anonymous", msg.comment, msg.urgent || false);
       }
     } catch {
       // ignore bad messages
@@ -119,5 +119,18 @@ server.listen(PORT, async () => {
     console.log(`  [ok] Ollama ready with model: ${ollama.model}`);
   }
 
-  console.log("  [..] Open the frontend and click 'Start Show' to begin.\n");
+  // Auto-start the show if requested via env var
+  if (process.env.AUTO_START === "true" || process.env.AUTO_START === "1") {
+    console.log("  [..] AUTO_START=true — starting show in 5s...\n");
+    setTimeout(() => {
+      if (!orchestrator.running) {
+        orchestrator.start().catch((err) => {
+          console.error("[server] Auto-start show crashed:", err);
+        });
+      }
+    }, 5000);
+  } else {
+    console.log("  [..] Open the frontend and click 'Start Show' to begin.\n");
+    console.log("  [..] Set AUTO_START=true to start automatically on boot.\n");
+  }
 });
