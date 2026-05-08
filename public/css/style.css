@@ -92,6 +92,15 @@ body {
   text-align: center;
   opacity: 0;
   transition: opacity 0.3s ease;
+
+  /* Clamp to 2 lines max so a long sentence never eats the avatar */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-wrap: break-word;
 }
 
 #subtitle-bar.visible {
@@ -756,11 +765,16 @@ body.stream-mode #avatar-container {
   height: 100vh;
 }
 
-/* Stream mode: subtitle is larger and more visible */
+/* Stream mode: subtitle sits at the bottom, clamped to 2 lines.
+   Wider max-width + slightly smaller text fits 2 lines comfortably on 1280x720
+   without eating the avatar. The 2-line clamp inherits from #subtitle-bar. */
 body.stream-mode #subtitle-bar {
-  font-size: 1.6rem;
-  padding: 18px 40px;
-  bottom: 100px;
+  font-size: 1.25rem;
+  line-height: 1.3;
+  padding: 10px 24px;
+  bottom: 60px;
+  max-width: 90%;
+  background: rgba(0, 0, 0, 0.82);
 }
 
 /* Stream mode: ticker is more prominent */

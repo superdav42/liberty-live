@@ -170,12 +170,17 @@
     async function initAvatar() {
       const container = document.getElementById("avatar");
 
+      // Stream mode runs in headless Chrome on the host's NVIDIA GPU
+      // (see stream.sh — Chrome is launched with --use-gl=angle --use-angle=gl
+      // so WebGL is hardware-accelerated, not swiftshader). 30fps + pixelRatio:1
+      // is the right target — pixelRatio>1 just doubles work without visible
+      // benefit on a 1280x720 capture.
       head = new TalkingHead(container, {
         ttsEndpoint: null, // We handle TTS ourselves via HeadTTS
         lipsyncModules: ["en"],
         cameraView: "upper",
         modelFPS: 30,
-        modelPixelRatio: Math.min(window.devicePixelRatio, 2),
+        modelPixelRatio: STREAM_MODE ? 1 : Math.min(window.devicePixelRatio, 2),
         lightAmbientIntensity: 2.5,
         lightDirectIntensity: 20,
         // Natural movement - keep avatar alive
@@ -288,6 +293,87 @@
       }
     }
 
+    // --- Subtitle chunking ---
+    // A long sentence (200+ chars) can't fit in a 2-line subtitle bar without
+    // a lot of ellipsis. Split it into ~80-char chunks at clause boundaries
+    // (commas, semicolons, em-dashes) when possible, falling back to word
+    // boundaries. Each chunk also carries the word index range it covers, so
+    // we can schedule its display against HeadTTS's per-word timings.
+    const SUBTITLE_CHUNK_MAX_CHARS = 80;
+
+    function chunkSentenceForSubtitle(text) {
+      const words = text.split(/\s+/).filter(Boolean);
+      if (words.length === 0) return [];
+
+      // Find good split points: punctuation that ends a clause.
+      // Each entry is the index of the LAST word that ends a clause.
+      const clauseEnds = new Set();
+      for (let i = 0; i < words.length; i++) {
+        if (/[,;:—–]$/.test(words[i])) clauseEnds.add(i);
+      }
+
+      const chunks = [];
+      let chunkStart = 0;
+      let runningLen = 0;
+      for (let i = 0; i < words.length; i++) {
+        runningLen += words[i].length + 1; // +1 for space
+        const isLast = i === words.length - 1;
+        const overBudget = runningLen > SUBTITLE_CHUNK_MAX_CHARS;
+        const atClause = clauseEnds.has(i);
+
+        // Cut here if (a) we're past budget AND at a clause boundary, OR
+        // (b) we're way over budget (1.4x), OR (c) it's the last word.
+        if (isLast ||
+            (overBudget && atClause) ||
+            runningLen > SUBTITLE_CHUNK_MAX_CHARS * 1.4) {
+          chunks.push({
+            text: words.slice(chunkStart, i + 1).join(" "),
+            firstWordIdx: chunkStart,
+            lastWordIdx: i,
+          });
+          chunkStart = i + 1;
+          runningLen = 0;
+        }
+      }
+      return chunks;
+    }
+
+    // Tracks the active chunk-display timers so we can cancel them if the
+    // queue is interrupted mid-sentence.
+    let subtitleTimers = [];
+    function clearSubtitleTimers() {
+      for (const t of subtitleTimers) clearTimeout(t);
+      subtitleTimers = [];
+    }
+
+    function scheduleChunkedSubtitles(chunks, wtimes, wdurations, totalMs) {
+      clearSubtitleTimers();
+      if (chunks.length === 0) return;
+
+      const haveTimings = Array.isArray(wtimes) && wtimes.length > 0;
+
+      for (let i = 0; i < chunks.length; i++) {
+        const c = chunks[i];
+        let startMs;
+        if (haveTimings && wtimes[c.firstWordIdx] !== undefined) {
+          // Use HeadTTS word timing (audio-synced).
+          startMs = wtimes[c.firstWordIdx];
+        } else {
+          // No timings — distribute evenly across totalMs.
+          startMs = (totalMs * i) / chunks.length;
+        }
+
+        // First chunk shows immediately; subsequent ones get scheduled.
+        if (i === 0) {
+          showSubtitle(c.text);
+        } else {
+          subtitleTimers.push(setTimeout(() => {
+            showSubtitle(c.text);
+          }, Math.max(0, startMs)));
+        }
+      }
+    }
+
     // --- HeadTTS integration ---
     async function speakText(text, mood, gesture) {
       // Set mood on avatar BEFORE speaking for immediate expression change
@@ -295,8 +381,14 @@
         head.setMood(mood);
       }
 
-      // Show subtitle
-      showSubtitle(text);
+      // Pre-compute chunks so we can show the first one even before TTS
+      // returns; rest are scheduled once we have timings (or duration).
+      const chunks = chunkSentenceForSubtitle(text);
+      if (chunks.length > 0) {
+        showSubtitle(chunks[0].text);
+      } else {
+        showSubtitle(text);
+      }
 
       // Trigger gesture if specified (passed as third param)
       if (head && gesture) {
@@ -338,18 +430,25 @@
           vdurations: data.vdurations || [],
         };
 
+        const durationMs = audioBuffer.duration * 1000;
+
+        // Schedule the rest of the chunks against HeadTTS word timings so
+        // each chunk pops in just as Liberty starts speaking it.
+        scheduleChunkedSubtitles(chunks, data.wtimes, data.wdurations, durationMs);
+
         head.speakAudio(audioObj, { lipsyncLang: "en" }, () => {});
 
         // Wait for audio duration before processing next sentence
         // Trailing buffer is short (60ms) so sentences flow into each other
-        const durationMs = (audioBuffer.duration * 1000) + 60;
-        await sleep(durationMs);
+        await sleep(durationMs + 60);
 
       } catch (err) {
         // HeadTTS not available — show text with reading pause (also faster now)
         log("HeadTTS unavailable: " + err.message, "warn");
         const wordCount = text.split(/\s+/).length;
         const readingTime = wordCount * 120; // ~120ms per word (faster)
+        // Fall back to even chunk distribution across the reading time.
+        scheduleChunkedSubtitles(chunks, null, null, readingTime);
         await sleep(readingTime);
       }
 
@@ -371,6 +470,7 @@
           shouldInterrupt = false;
           log("Queue interrupted for urgent response");
           speechQueue = []; // Clear remaining queue
+          clearSubtitleTimers(); // Cancel any pending chunk reveals
           break;
         }
 
