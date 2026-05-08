@@ -15,6 +15,26 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# ── GPU group bootstrap ──────────────────────────────────────────────────────
+# systemd user services inherit groups from user@<uid>.service, which usually
+# was started long before we added "video"/"render" to the user. If we don't
+# yet have those groups in this process, re-exec under sg(1) so the children
+# (Chrome, ffmpeg) inherit them and can open /dev/dri/* for GPU rendering and
+# NVENC. Skip if the user manager has already been restarted with new groups.
+if [[ "${LIBERTY_GPU_BOOTSTRAPPED:-0}" != "1" ]]; then
+  if ! id -G | tr ' ' '\n' | grep -q '^110$'; then
+    if command -v sg >/dev/null 2>&1; then
+      echo "[stream] Re-executing under 'sg render' so Chrome/ffmpeg can reach /dev/dri/*"
+      export LIBERTY_GPU_BOOTSTRAPPED=1
+      # sg only adds one group at a time; we need both video (card*) and
+      # render (renderD*). Nest them.
+      exec sg render -c "sg video -c '$0 $*'"
+    else
+      echo "[stream] WARNING: not in render group and 'sg' not available — GPU path will fail back to swiftshader"
+    fi
+  fi
+fi
+
 # ── Load .env ────────────────────────────────────────────────────────────────
 if [[ -f "$ROOT/.env" ]]; then
   # shellcheck disable=SC2163
@@ -103,21 +123,46 @@ fi
 echo "[stream] Xvfb running (PID $XVFB_PID)"
 
 # ── Chrome ───────────────────────────────────────────────────────────────────
-echo "[stream] Starting Chrome on $DISP..."
+# GPU-accelerated WebGL via NVIDIA EGL.
+#
+# The host has NVIDIA P102 cards with the proprietary driver (libEGL_nvidia).
+# Chrome's GPU process opens /dev/dri/renderD128 (renderD128 is on NVIDIA via
+# nvidia-drm) to get a real OpenGL context, then composites into the X11 window
+# on Xvfb. This needs the user to be in the "render" group (and "video" for
+# /dev/dri/card*). Done at install time:
+#   sudo usermod -aG video,render dave
+#
+# If the GPU path fails for any reason, Chrome falls back to swiftshader on its
+# own (it logs "GpuProcessHost: GPU process exited" and respawns).
+#
+# Flag rationale:
+#   --use-gl=angle --use-angle=gl: ANGLE in passthrough-to-native-GL mode
+#       (instead of swiftshader). On NVIDIA this picks up libGL via the
+#       NVIDIA driver.
+#   --enable-features=VaapiVideoDecoder: NVIDIA NVDEC for any video the page
+#       might play (not strictly needed for our avatar).
+#   --ignore-gpu-blocklist: P102 mining cards aren't on Chrome's allowlist;
+#       the blocklist would otherwise force swiftshader fallback.
+#   --enable-zero-copy / --enable-gpu-rasterization: make the GPU path the
+#       fast path for compositing.
+echo "[stream] Starting Chrome on $DISP (GPU: NVIDIA EGL)..."
 DISPLAY="$DISP" \
 PULSE_SERVER="$PULSE_SOCK" \
 XDG_RUNTIME_DIR="/run/user/$(id -u)" \
+__GLX_VENDOR_LIBRARY_NAME=nvidia \
+__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json \
 google-chrome \
   --no-sandbox \
   --test-type \
   --disable-dev-shm-usage \
   --use-gl=angle \
-  --use-angle=swiftshader \
-  --enable-unsafe-swiftshader \
+  --use-angle=gl \
   --ignore-gpu-blocklist \
+  --enable-gpu-rasterization \
+  --enable-zero-copy \
   --enable-webgl \
   --enable-webgl2 \
-  --enable-features=Vulkan,UseSkiaRenderer \
+  --enable-features=VaapiVideoDecoder,UseSkiaRenderer,Vulkan \
   --autoplay-policy=no-user-gesture-required \
   --window-size="${RES/x/,}" \
   --window-position=0,0 \
@@ -186,6 +231,56 @@ else
   echo "[stream] Streaming to YouTube Live..."
 fi
 
+# ── Video encoder selection ──────────────────────────────────────────────────
+# Prefer h264_nvenc (NVIDIA hardware encoder), but actually probe — some cards
+# (e.g. P102-100 mining boards) list NVENC in ffmpeg's encoder table because
+# the driver loads it, but the silicon has NVENC fused off. The probe runs a
+# 1-frame encode against /dev/null and checks the exit code.
+#
+# Set FORCE_LIBX264=1 in .env to skip the probe and always use libx264.
+USE_NVENC=false
+if [[ "${FORCE_LIBX264:-0}" != "1" ]]; then
+  if ffmpeg -hide_banner -loglevel error \
+        -f lavfi -i "color=c=black:s=128x128:d=0.1" \
+        -c:v h264_nvenc -f null - 2>/dev/null; then
+    USE_NVENC=true
+  fi
+fi
+
+if [[ "$USE_NVENC" == "true" ]]; then
+  # NVENC: GPU encode, near-zero CPU cost, consistent frame timing.
+  VIDEO_CODEC_ARGS=(
+    -c:v h264_nvenc
+    -preset p4
+    -tune ll
+    -profile:v high
+    -rc cbr
+    -b:v "$VBITRATE"
+    -maxrate "$VBITRATE"
+    -bufsize "$VBITRATE"
+    -pix_fmt yuv420p
+    -g "$GOP"
+    -keyint_min "$FPS"
+    -bf 0
+  )
+  echo "[stream] Using NVENC hardware H.264 encoder"
+else
+  BUFSIZE_K="$(echo "$VBITRATE" | tr -d 'k' | awk '{printf "%dk", $1 * 2}')"
+  VIDEO_CODEC_ARGS=(
+    -c:v libx264
+    -preset veryfast
+    -tune zerolatency
+    -b:v "$VBITRATE"
+    -maxrate "$VBITRATE"
+    -bufsize "$BUFSIZE_K"
+    -pix_fmt yuv420p
+    -g "$GOP"
+    -keyint_min "$FPS"
+  )
+  echo "[stream] Using libx264 CPU encoder (NVENC unavailable on this GPU)"
+fi
+
+# shellcheck disable=SC2086  # FFMPEG_OUTPUT intentionally word-split
 ffmpeg \
   -f x11grab \
     -framerate "$FPS" \
@@ -194,15 +289,7 @@ ffmpeg \
     -i "${DISP}+0,0" \
   -f pulse \
     -i "$AUDIO_SOURCE" \
-  -c:v libx264 \
-    -preset veryfast \
-    -tune zerolatency \
-    -b:v "$VBITRATE" \
-    -maxrate "$VBITRATE" \
-    -bufsize "$(echo "$VBITRATE" | tr -d 'k' | awk '{printf "%dk", $1 * 2}')" \
-    -pix_fmt yuv420p \
-    -g "$GOP" \
-    -keyint_min "$FPS" \
+  "${VIDEO_CODEC_ARGS[@]}" \
   -c:a aac \
     -b:a "$ABITRATE" \
     -ar 44100 \
