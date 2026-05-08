@@ -27,12 +27,34 @@
       <div id="news-ticker">
         <span id="ticker-content">Waiting for show to start...</span>
       </div>
+
+      <!-- Article panel: shows current article being discussed -->
+      <div id="article-panel" class="hidden">
+        <div id="article-header">
+          <div id="article-source"></div>
+          <button id="article-close" onclick="closeArticlePanel()" title="Hide">×</button>
+        </div>
+        <div id="article-headline"></div>
+        <div id="article-body">
+          <iframe id="article-iframe"
+                  sandbox="allow-same-origin allow-scripts"
+                  referrerpolicy="no-referrer"
+                  loading="lazy"></iframe>
+          <div id="article-extract"></div>
+        </div>
+        <div id="article-footer">
+          <a id="article-link" href="#" target="_blank" rel="noopener noreferrer">Open article ↗</a>
+        </div>
+      </div>
     </div>
   </div>
 
+  <!-- Floating toggle button for mobile -->
+  <button id="floating-toggle" onclick="toggleControls(event)">⚙️</button>
+
   <!-- Control panel (not visible during stream capture) -->
   <div id="controls">
-    <h2>Liberty Live Control Room</h2>
+    <div id="controls-toggle" onclick="toggleControls(event)">⚙️ Controls</div>
 
     <div id="status-bar">
       <span id="status-indicator" class="offline"></span>
@@ -45,15 +67,61 @@
       <button id="btn-stop" onclick="stopShow()" disabled>Stop Show</button>
     </div>
 
-    <div class="control-group">
-      <h3>Send Viewer Comment</h3>
-      <input type="text" id="viewer-name" placeholder="Your name" value="Chat Viewer">
-      <textarea id="viewer-comment" placeholder="Type a comment for Liberty to respond to..." rows="2"></textarea>
-      <button onclick="sendComment()">Send Comment</button>
+    <div class="control-group" id="tts-settings">
+      <h3>TTS Settings</h3>
+      <!-- Only af_bella is available in this Kokoro build -->
+      <label>
+        <span>Voice</span>
+        <select id="voice-select" onchange="updateVoice(this.value)" disabled title="Only af_bella available">
+          <option value="af_bella" selected>af_bella (Female) — only voice available</option>
+        </select>
+      </label>
+      <label>
+        <span>Speed: <span id="speed-value">1.5</span>x</span>
+        <input type="range" id="speed-slider" min="0.8" max="2.0" step="0.1" value="1.5" oninput="updateSpeed(this.value)">
+      </label>
     </div>
 
+    <!-- Camera controls -->
     <div class="control-group">
-      <h3>Show Log</h3>
+      <h3>Camera</h3>
+      <div class="btn-group">
+        <button onclick="setCameraView('head')">Head</button>
+        <button onclick="setCameraView('upper')">Upper</button>
+        <button onclick="setCameraView('mid')">Mid</button>
+        <button onclick="setCameraView('head', {cameraY: -0.2})">Low</button>
+      </div>
+      <label class="toggle-row">
+        <input type="checkbox" id="auto-camera" checked onchange="toggleAutoCamera(this.checked)">
+        <span>Auto-cycle camera</span>
+      </label>
+    </div>
+
+    <!-- Background controls -->
+    <div class="control-group">
+      <h3>Background</h3>
+      <div class="btn-group">
+        <button onclick="setBackground('studio')">Studio</button>
+        <button onclick="setBackground('night-city')">Night</button>
+        <button onclick="setBackground('sunset')">Sunset</button>
+        <button onclick="setBackground('abstract')">Abstract</button>
+        <button onclick="setBackground('deep-blue')">Deep</button>
+      </div>
+    </div>
+
+    <div class="control-group" id="comment-group">
+      <h3>Send Comment</h3>
+      <input type="text" id="viewer-name" placeholder="Your name" value="Chat Viewer">
+      <textarea id="viewer-comment" placeholder="Comment for Liberty..." rows="2"></textarea>
+      <label class="urgent-toggle">
+        <input type="checkbox" id="urgent-comment">
+        <span>Urgent</span>
+      </label>
+      <button onclick="sendComment()">Send</button>
+    </div>
+
+    <div class="control-group" id="log-group">
+      <h3 onclick="toggleLog()">Show Log ▶</h3>
       <div id="show-log"></div>
     </div>
   </div>
@@ -66,6 +134,29 @@
     let ws = null;
     let speechQueue = [];
     let isSpeaking = false;
+    let isThinking = false;
+    let thinkingInterval = null;
+    let autoCameraEnabled = true;
+    let cameraIdx = 0;
+    let bgIdx = 0;
+
+    // Background scenes (gradients for now, can add images later)
+    const BACKGROUNDS = [
+      { name: "studio", class: "bg-studio" },
+      { name: "night city", class: "bg-night-city" },
+      { name: "sunset", class: "bg-sunset" },
+      { name: "abstract", class: "bg-abstract" },
+      { name: "deep blue", class: "bg-deep-blue" },
+    ];
+    let currentBgIndex = 0;
+
+    // TTS settings
+    let currentVoice = "af_bella";
+    let currentSpeed = 1.5; // 50% faster than default
+
+    // Article state — current article being discussed
+    let currentArticle = null; // { headline, source, url, articleText, quotes: [] }
+    let articleIframeFailed = false;
 
     // HeadTTS server — derive from current host so it works over LAN too
     const HEADTTS_REST = `http://${location.hostname}:8882`;
@@ -84,19 +175,52 @@
         lipsyncModules: ["en"],
         cameraView: "upper",
         modelFPS: 30,
+        modelPixelRatio: Math.min(window.devicePixelRatio, 2),
         lightAmbientIntensity: 2.5,
         lightDirectIntensity: 20,
+        // Natural movement - keep avatar alive
         avatarMood: "neutral",
         avatarIdleEyeContact: 0.6,
-        avatarSpeakingEyeContact: 0.8,
-        avatarSpeakingHeadMove: 0.6,
+        avatarSpeakingEyeContact: 0.9,
+        avatarIdleHeadMove: 0.3,
+        avatarSpeakingHeadMove: 0.4,
+        avatarBodyMove: 0.2,
+        enableCamera: false,
       });
 
-      // Load avatar — using the bundled example avatar
-      // Replace with your own VRoid/custom GLB file in public/avatars/
+      // After avatar loads, reset camera to proper view to prevent drift
+      const originalShowAvatar = head.showAvatar;
+      head.showAvatar = async function(...args) {
+        const result = await originalShowAvatar.apply(this, args);
+        // Reset to upper view after loading - prevents default camera from settling wrong
+        setTimeout(() => {
+          if (head && head.setView) {
+            head.setView("upper", {});
+          }
+        }, 500);
+        return result;
+      };
+
+      // Expose head globally so the stream-mode pin interval can reach it
+      window.head = head;
+
+      // Auto-cycle camera every 30 seconds for visual variety
+      // Disabled in stream mode (camera stays locked on upper view)
+      if (!STREAM_MODE) {
+        window.cameraInterval = setInterval(() => {
+          if (head && head.setView && !document.hidden) {
+            const views = ['upper', 'mid', 'head', 'upper'];
+            const idx = (window.cameraIdx = (window.cameraIdx || 0) % 4);
+            head.setView(views[idx], {});
+            log(`Camera: ${views[idx]}`);
+          }
+        }, 30000);
+      }
+
+      // Load avatar — local copy (has ARKit + Oculus visemes for lip-sync)
       try {
         await head.showAvatar({
-          url: "https://cdn.jsdelivr.net/gh/met4citizen/TalkingHead@1.7/avatars/brunette.glb",
+          url: "avatars/brunette.glb",
           body: "F",
           avatarMood: "neutral",
           lipsyncLang: "en",
@@ -107,14 +231,65 @@
           },
         });
         log("Avatar loaded");
+        // Notify stream-mode pin loop the avatar is ready
+        window.dispatchEvent(new Event("avatar-ready"));
       } catch (err) {
         log("Avatar load error: " + err.message, "error");
         console.error("Avatar load error:", err);
       }
     }
 
+    // --- Gesture system ---
+    // Map gesture names to TalkingHead/face moods for avatar animations
+    // Since TalkingHead face-only doesn't have full body, we simulate gestures
+    // through mood intensifications or head movements
+    const GESTURE_MOOD_MAP = {
+      "point": "angry",      // pointing = emphasis/assertion
+      "fist": "angry",       // fist pump = angry/energetic
+      "clap": "happy",       // applause = happy
+      "shrug": "sad",        // shrug = resigned
+      "think": "fear",       // thinking = contemplative
+      "wave": "happy",      // wave = greeting
+      "raise": "happy",      // raise finger = attention
+    };
+
+    async function triggerGesture(gesture) {
+      if (!head) return;
+
+      // Map to mood for face-only avatar
+      const mood = GESTURE_MOOD_MAP[gesture] || "neutral";
+
+      // Apply temporary mood for gesture duration
+      head.setMood(mood);
+      log(`Gesture: ${gesture} (mood: ${mood})`);
+
+      // Skip the manual camera nudge in stream mode (the pin loop fights it
+      // and the avatar ends up at feet level). Mood change alone is enough.
+      if (STREAM_MODE) return;
+
+      // Brief head movement simulation
+      const camera = head.camera;
+      if (camera) {
+        const originalX = camera.position.x;
+        const originalY = camera.position.y;
+
+        // Subtle head tilt based on gesture
+        if (gesture === "shrug") {
+          camera.position.y += 0.02;
+        } else if (gesture === "point" || gesture === "raise") {
+          camera.position.x += 0.03;
+        }
+
+        await sleep(800);
+
+        // Return to position
+        camera.position.x = originalX;
+        camera.position.y = originalY;
+      }
+    }
+
     // --- HeadTTS integration ---
-    async function speakText(text, mood) {
+    async function speakText(text, mood, gesture) {
       // Set mood on avatar BEFORE speaking for immediate expression change
       if (head && mood) {
         head.setMood(mood);
@@ -123,6 +298,11 @@
       // Show subtitle
       showSubtitle(text);
 
+      // Trigger gesture if specified (passed as third param)
+      if (head && gesture) {
+        triggerGesture(gesture);
+      }
+
       // Try HeadTTS REST API
       try {
         const resp = await fetch(HEADTTS_REST + "/v1/synthesize", {
@@ -130,9 +310,9 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             input: text,
-            voice: "af_bella",
+            voice: currentVoice,
             language: "en-us",
-            speed: 1,
+            speed: currentSpeed,
             audioEncoding: "wav",
           }),
         });
@@ -161,20 +341,21 @@
         head.speakAudio(audioObj, { lipsyncLang: "en" }, () => {});
 
         // Wait for audio duration before processing next sentence
-        const durationMs = (audioBuffer.duration * 1000) + 200;
+        // Trailing buffer is short (60ms) so sentences flow into each other
+        const durationMs = (audioBuffer.duration * 1000) + 60;
         await sleep(durationMs);
 
       } catch (err) {
-        // HeadTTS not available — show text with reading pause
+        // HeadTTS not available — show text with reading pause (also faster now)
         log("HeadTTS unavailable: " + err.message, "warn");
         const wordCount = text.split(/\s+/).length;
-        const readingTime = wordCount * 180; // ~180ms per word
+        const readingTime = wordCount * 120; // ~120ms per word (faster)
         await sleep(readingTime);
       }
 
-      // Ease back to neutral after speaking (keep for a moment first)
+      // Ease back to neutral after speaking
       if (head && mood !== "neutral") {
-        await sleep(200);
+        await sleep(80);
         head.setMood("neutral");
       }
     }
@@ -185,18 +366,32 @@
       isSpeaking = true;
 
       while (speechQueue.length > 0) {
+        // Check for interrupt flag (set when server sends "interrupt" message)
+        if (shouldInterrupt) {
+          shouldInterrupt = false;
+          log("Queue interrupted for urgent response");
+          speechQueue = []; // Clear remaining queue
+          break;
+        }
+
         const item = speechQueue.shift();
         const remaining = speechQueue.length;
         if (remaining > 2) {
           log(`Speaking (${remaining} queued): "${item.text.slice(0, 50)}"`);
         }
-        await speakText(item.text, item.mood);
-        await sleep(250); // brief pause between sentences
+        await speakText(item.text, item.mood, item.gesture);
+        await sleep(80); // brief pause between sentences (tighter pacing)
       }
 
       isSpeaking = false;
-      hideSubtitle();
+      // Only hide subtitle if queue is actually empty
+      if (speechQueue.length === 0) {
+        hideSubtitle();
+      }
     }
+
+    // Flag set when server sends interrupt message
+    let shouldInterrupt = false;
 
     // --- WebSocket connection to server ---
     function connectWS() {
@@ -233,9 +428,22 @@
 
     function handleServerMessage(msg) {
       switch (msg.type) {
+        case "interrupt":
+          // Server wants us to stop current speech and clear queue for urgent response
+          shouldInterrupt = true;
+          // Stop any current audio playback
+          if (head && head.audioCtx) {
+            head.audioCtx.suspend();
+            head.audioCtx.resume();
+          }
+          log("Received interrupt signal");
+          break;
+
         case "speak":
-          speechQueue.push({ text: msg.text, mood: msg.mood });
+          speechQueue.push({ text: msg.text, mood: msg.mood, gesture: msg.gesture });
           processSpeechQueue();
+          // Try to highlight any quote that this sentence is reading verbatim
+          highlightMatchingQuote(msg.text);
           break;
 
         case "show_start":
@@ -258,20 +466,45 @@
           if (msg.headline) {
             updateTicker(msg.headline);
             log(`[${msg.segmentType}] ${msg.headline}`);
+            // News segment: populate the article panel
+            showArticlePanel({
+              headline: msg.headline,
+              source: msg.source,
+              url: msg.url,
+              articleText: msg.articleText || "",
+              quotes: msg.quotes || [],
+            });
           } else if (msg.topic) {
             updateTicker(`Monologue: ${msg.topic}`);
             log(`[${msg.segmentType}] ${msg.topic}`);
+            // Non-news segments: hide the article panel
+            hideArticlePanel();
           } else {
             log(`[${msg.segmentType}]`);
+            hideArticlePanel();
           }
           break;
 
         case "generating_start":
+          isThinking = true;
+          startThinkingAnimation();
           log("Generating: " + (msg.prompt || "").slice(0, 80));
           break;
 
         case "generating_done":
-          log(`Generation done (${speechQueue.length} queued)`);
+          isThinking = false;
+          stopThinkingAnimation();
+          // Auto-cycle camera (skip in stream mode — camera is pinned)
+          if (!STREAM_MODE && autoCameraEnabled && head && head.setView) {
+            const views = ['upper', 'mid', 'upper', 'head'];
+            cameraIdx = (cameraIdx + 1) % 4;
+            head.setView(views[cameraIdx], {});
+          }
+          // Cycle background (always — looks good on stream too)
+          const backgrounds = ['studio', 'night-city', 'sunset', 'abstract', 'deep-blue'];
+          bgIdx = (bgIdx + 1) % 5;
+          const c = document.getElementById('avatar-container');
+          c.className = 'bg-' + backgrounds[bgIdx];
           break;
 
         case "status":
@@ -281,6 +514,46 @@
 
         default:
           break;
+      }
+    }
+
+    // --- Thinking animation (during LLM inference) ---
+    // These idle animations play while waiting for LLM generation
+    function startThinkingAnimation() {
+      if (!head || thinkingInterval) return;
+      // In stream mode, skip the camera nudge entirely — it overwrites
+      // absolute positions and fights the head.setView pin, causing the
+      // camera to drift to feet level. TalkingHead's built-in idle motion
+      // is enough to keep the avatar lively.
+      if (STREAM_MODE) return;
+
+      let angle = 0;
+
+      // Gentle head rotation loop
+      thinkingInterval = setInterval(() => {
+        if (!head || !head.camera) return;
+
+        angle += 0.05;
+        const camera = head.camera;
+
+        // Subtle circular head movement
+        camera.position.x = Math.sin(angle) * 0.03;
+        camera.position.y = Math.cos(angle * 0.7) * 0.015;
+      }, 50);
+    }
+
+    function stopThinkingAnimation() {
+      if (thinkingInterval) {
+        clearInterval(thinkingInterval);
+        thinkingInterval = null;
+      }
+
+      // Re-pin to upper view so the camera doesn't drift to feet level.
+      // The previous code set position to 0,0 which is wrong — TalkingHead's
+      // upper view does not put the camera at origin, so 0,0 ended up showing
+      // the avatar's feet.
+      if (head && head.setView) {
+        head.setView("upper", { cameraY: -0.1 });
       }
     }
 
@@ -298,6 +571,47 @@
 
     function updateTicker(text) {
       document.getElementById("ticker-content").textContent = text;
+    }
+
+    // Cycle background scene after each segment
+    function cycleBackground() {
+      currentBgIndex = (currentBgIndex + 1) % BACKGROUNDS.length;
+      const container = document.getElementById("avatar-container");
+      const bg = BACKGROUNDS[currentBgIndex];
+      
+      // Remove all background classes
+      for (const b of BACKGROUNDS) {
+        container.classList.remove(b.class);
+      }
+      
+      // Add new background class
+      container.classList.add(bg.class);
+      log(`Background: ${bg.name}`);
+    }
+
+    // Cycle camera view between segments using TalkingHead's setView API
+    function cycleCameraAngle() {
+      if (!head) {
+        console.log("[camera] No head yet");
+        return;
+      }
+      if (!head.setView) {
+        console.log("[camera] setView not available");
+        return;
+      }
+      
+      currentCameraIndex = (currentCameraIndex + 1) % CAMERA_VIEWS.length;
+      const view = CAMERA_VIEWS[currentCameraIndex];
+      
+      console.log(`[camera] Cycling to: ${view.name}`);
+      
+      // Use setView to change camera angle smoothly
+      try {
+        head.setView(view.name, view.opts);
+        log(`Camera: ${view.name}`);
+      } catch (err) {
+        console.log("[camera] Error:", err.message);
+      }
     }
 
     function updateStatus(state, text) {
@@ -336,21 +650,266 @@
     function sendComment() {
       const name = document.getElementById("viewer-name").value;
       const comment = document.getElementById("viewer-comment").value;
+      const urgent = document.getElementById("urgent-comment").checked;
       if (!comment.trim()) return;
 
       if (ws && ws.readyState === 1) {
-        ws.send(JSON.stringify({ type: "comment", name, comment }));
+        ws.send(JSON.stringify({ type: "comment", name, comment, urgent }));
       }
       document.getElementById("viewer-comment").value = "";
-      log(`[comment] ${name}: ${comment}`);
+      document.getElementById("urgent-comment").checked = false;
+      log(`[comment] ${name}: ${comment}${urgent ? " (URGENT)" : ""}`);
+    }
+
+    // TTS control functions
+    window.updateVoice = function(voice) {
+      currentVoice = voice;
+      log("Voice: " + voice);
+    };
+
+    window.updateSpeed = function(speed) {
+      currentSpeed = parseFloat(speed);
+      document.getElementById("speed-value").textContent = currentSpeed.toFixed(1);
+      log("Speed: " + currentSpeed + "x");
+    };
+
+    // Manual camera view control
+    window.setCameraView = function(view, opts) {
+      if (head && head.setView) {
+        head.setView(view, opts || {});
+        // Reset to upper after a delay if not already there - keeps camera from drifting
+        log(`Camera: ${view}`);
+      }
+    };
+
+    // Toggle auto camera cycling
+    window.toggleAutoCamera = function(enabled) {
+      window.autoCameraEnabled = enabled;
+      log(`Auto camera: ${enabled ? 'ON' : 'OFF'}`);
+    };
+
+    // Manual background control
+    window.setBackground = function(bg) {
+      const container = document.getElementById('avatar-container');
+      container.className = '';
+      container.classList.add('bg-' + bg);
+      log(`Background: ${bg}`);
+    };
+
+    // Toggle controls panel visibility
+    window.toggleControls = function(e) {
+      if (e) {
+        e.stopPropagation();
+      }
+      document.getElementById("controls").classList.toggle("visible");
+    };
+
+    // Toggle log visibility
+    window.toggleLog = function(e) {
+      if (e) {
+        e.stopPropagation();
+      }
+      const logGroup = document.getElementById("log-group");
+      const logContent = document.getElementById("show-log");
+      logGroup.classList.toggle("log-expanded");
+      const heading = logGroup.querySelector("h3");
+      if (logGroup.classList.contains("log-expanded")) {
+        heading.textContent = "Show Log ▼";
+        logContent.style.display = "block";
+      } else {
+        heading.textContent = "Show Log ▶";
+        logContent.style.display = "none";
+      }
+    };
+
+    // --- Article panel ---
+    // Shows the article currently being discussed. Tries an iframe first
+    // (most major news sites block iframing via X-Frame-Options or CSP, so
+    // we always render the server-extracted text underneath as a fallback
+    // and treat the iframe as a best-effort enhancement).
+
+    function showArticlePanel(article) {
+      currentArticle = article;
+      articleIframeFailed = false;
+
+      const panel = document.getElementById("article-panel");
+      const headlineEl = document.getElementById("article-headline");
+      const sourceEl = document.getElementById("article-source");
+      const linkEl = document.getElementById("article-link");
+      const iframeEl = document.getElementById("article-iframe");
+      const extractEl = document.getElementById("article-extract");
+
+      headlineEl.textContent = article.headline || "";
+      sourceEl.textContent = article.source || "";
+
+      if (article.url) {
+        linkEl.href = article.url;
+        linkEl.style.display = "inline-block";
+        // Best-effort iframe — most news sites block this; we show the extract
+        // alongside so the panel always has content.
+        iframeEl.src = article.url;
+        iframeEl.style.display = "block";
+        // If the iframe doesn't fire a load event within 5s, assume it was
+        // blocked by X-Frame-Options/CSP and hide it. We only check our side
+        // of the load handler — actual cross-origin block detection is not
+        // possible from JS, but the timeout is a decent proxy.
+        const loadTimer = setTimeout(() => {
+          articleIframeFailed = true;
+          iframeEl.style.display = "none";
+          log("Article iframe blocked (X-Frame-Options or CSP) — showing extract only");
+        }, 5000);
+        iframeEl.onload = () => clearTimeout(loadTimer);
+        iframeEl.onerror = () => {
+          clearTimeout(loadTimer);
+          articleIframeFailed = true;
+          iframeEl.style.display = "none";
+        };
+      } else {
+        linkEl.style.display = "none";
+        iframeEl.style.display = "none";
+        iframeEl.src = "about:blank";
+      }
+
+      // Render the readable extract (always — this is the reliable display)
+      extractEl.innerHTML = renderExtractWithQuotes(article.articleText, article.quotes);
+
+      panel.classList.remove("hidden");
+    }
+
+    function hideArticlePanel() {
+      const panel = document.getElementById("article-panel");
+      panel.classList.add("hidden");
+      currentArticle = null;
+      const iframeEl = document.getElementById("article-iframe");
+      iframeEl.src = "about:blank";
+    }
+
+    window.closeArticlePanel = hideArticlePanel;
+
+    /**
+     * Render article extract with quoted sentences wrapped in <mark> tags
+     * so they can be highlighted when Liberty reads them aloud.
+     */
+    function renderExtractWithQuotes(text, quotes) {
+      if (!text) return "<em>No extract available.</em>";
+
+      const escaped = escapeHtml(text);
+      let result = escaped;
+
+      // Wrap each known quote in a <mark data-quote="..."> for later highlighting
+      for (const q of (quotes || [])) {
+        const escQ = escapeHtml(q);
+        // Match the quote (with surrounding double quotes if present)
+        const re = new RegExp(`["""]?${escapeRegExp(escQ)}["""]?`, "g");
+        result = result.replace(re, (m) =>
+          `<mark class="quote" data-quote="${escapeAttr(q)}">${m}</mark>`
+        );
+      }
+
+      return result;
+    }
+
+    /**
+     * When Liberty speaks a sentence, check if it contains one of the article's
+     * known quotes. If so, highlight that quote in the extract.
+     */
+    function highlightMatchingQuote(spokenText) {
+      if (!currentArticle || !currentArticle.quotes) return;
+
+      const spokenLower = spokenText.toLowerCase();
+      // Try each known quote — does the spoken sentence contain a substantial
+      // chunk of it? Use a 25-char prefix match to be tolerant of paraphrasing.
+      for (const q of currentArticle.quotes) {
+        const qLower = q.toLowerCase();
+        const probe = qLower.slice(0, 25);
+        if (probe.length < 15) continue;
+        if (spokenLower.includes(probe)) {
+          highlightQuote(q);
+          return;
+        }
+      }
+      // Also clear any previous highlight if no match
+      clearQuoteHighlights();
+    }
+
+    function highlightQuote(quoteText) {
+      const marks = document.querySelectorAll("#article-extract mark.quote");
+      marks.forEach((m) => {
+        if (m.dataset.quote === quoteText) {
+          m.classList.add("active");
+          // Scroll the highlighted quote into view within the extract
+          m.scrollIntoView({ behavior: "smooth", block: "center" });
+        } else {
+          m.classList.remove("active");
+        }
+      });
+    }
+
+    function clearQuoteHighlights() {
+      const marks = document.querySelectorAll("#article-extract mark.quote.active");
+      marks.forEach((m) => m.classList.remove("active"));
+    }
+
+    function escapeHtml(s) {
+      return String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function escapeAttr(s) {
+      return escapeHtml(s);
+    }
+
+    function escapeRegExp(s) {
+      return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }
+
+    // --- Stream mode ---
+    // ?stream or ?stream=1 in URL: hides controls, auto-starts show, clean for OBS
+    const STREAM_MODE = new URLSearchParams(location.search).has("stream");
+
+    if (STREAM_MODE) {
+      document.getElementById("controls").style.display = "none";
+      document.getElementById("floating-toggle").style.display = "none";
+      document.body.classList.add("stream-mode");
+      console.log("[stream] Stream mode active — controls hidden, show will auto-start");
+
+      // Stream mode: lock camera to the upper view permanently and disable
+      // auto-cycle + thinking-animation camera nudges (those drift to feet
+      // when their reset value of 0,0 doesn't match the upper-view default).
+      window.autoCameraEnabled = false;
+
+      // After avatar loads, re-pin the view every 5s and again whenever it
+      // might have drifted (covers the case where TalkingHead resets internally).
+      window.addEventListener("avatar-ready", () => {
+        const pin = () => {
+          if (window.head && window.head.setView) {
+            window.head.setView("upper", { cameraY: -0.1 });
+          }
+        };
+        pin();
+        setInterval(pin, 5000);
+      });
     }
 
     // --- Boot ---
     async function init() {
-      log("Initializing Liberty Live...");
+      if (!STREAM_MODE) {
+        log("Initializing Liberty Live...");
+      }
       await initAvatar();
       connectWS();
-      log("Ready. Click 'Start Show' to begin.");
+
+      if (STREAM_MODE) {
+        // Auto-start after avatar + WS are ready
+        setTimeout(() => startShow(), 3000);
+        console.log("[stream] Auto-starting show in 3s...");
+      } else {
+        log("Ready. Click 'Start Show' to begin.");
+      }
     }
 
     init();
